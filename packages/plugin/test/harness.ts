@@ -21,6 +21,7 @@ import {
   RemoteError,
   type RemoteShape,
   type SyncState,
+  VaultError,
   VaultIo,
 } from "../src/core/services.ts";
 
@@ -116,9 +117,13 @@ export class Device {
         stat: (path) => Effect.sync(() => stat(path)),
         read: (path) => Effect.sync(() => files.get(path)?.data.slice() ?? null),
         write: (path, data) =>
-          Effect.sync(() => {
-            files.set(path, { data: data.slice(), mtime: tick() });
-            return stat(path)!;
+          Effect.try({
+            try: () => {
+              files.set(path, { data: data.slice(), mtime: tick() });
+              return stat(path)!;
+            },
+            // Like the Obsidian adapter: filesystem errors surface as VaultError.
+            catch: (error) => new VaultError({ path, message: error instanceof Error ? error.message : String(error) }),
           }),
         remove: (path) => Effect.sync(() => void files.delete(path)),
       }),

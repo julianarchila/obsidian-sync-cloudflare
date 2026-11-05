@@ -333,6 +333,15 @@ export default class CloudflareSyncPlugin extends Plugin {
         },
       },
       onStatus: (status) => this.setState(status as SyncState),
+      onReport: (report) => {
+        if (report.skipped === 0) return;
+        const text =
+          `${report.skipped} file${report.skipped === 1 ? "" : "s"} couldn't be saved on this device ` +
+          `(usually a name with \\ / : * ? < > " that this system doesn't allow). ` +
+          "Rename them on another device to sync them here. See Activity.";
+        this.sync.setWarning(text);
+        new Notice(`Homebase: ${text}`, 10_000);
+      },
       onError: (message) => this.setState("offline", message),
     });
     await this.client.start();

@@ -51,6 +51,7 @@ export class StatusModal extends Modal {
     head.createSpan({ cls: "homebase-status-state", text: STATE_LABEL[status.state] });
     if (status.lastSync) head.createSpan({ cls: "homebase-status-muted", text: `Last synced ${ago(status.lastSync)}` });
     if (status.message) contentEl.createDiv({ cls: "homebase-status-message", text: status.message });
+    if (status.warning) contentEl.createDiv({ cls: "homebase-status-message", text: status.warning });
 
     const p = status.progress;
     if (p && p.total > 0) {

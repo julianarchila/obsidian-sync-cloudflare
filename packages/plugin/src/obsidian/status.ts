@@ -12,6 +12,8 @@ export class SyncStatus {
   state: SyncState = "not-configured";
   /** Extra context for the state (lock reason, last error). */
   message = "";
+  /** Persistent notice that survives state changes (e.g. files skipped on this device). */
+  warning = "";
   progress: Progress | null = null;
   lastSync: number | undefined;
   activity: Activity[] = [];
@@ -30,6 +32,11 @@ export class SyncStatus {
     this.state = state;
     this.message = message;
     if (state === "synced") this.lastSync = Date.now();
+    this.emit();
+  }
+
+  setWarning(warning: string) {
+    this.warning = warning;
     this.emit();
   }
 
@@ -83,4 +90,5 @@ export const ACTIVITY_LABEL: Record<Activity["kind"], string> = {
   merged: "Merged edits",
   conflict: "Conflict, kept both",
   restored: "Restored",
+  skipped: "Skipped, can't save on this device",
 };
