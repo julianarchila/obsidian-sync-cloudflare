@@ -127,6 +127,7 @@ const prepareVault = async (v: keyof typeof VAULTS) => {
   await mkdir(pluginDir, { recursive: true });
   await cp("packages/plugin/dist/main.js", join(pluginDir, "main.js"));
   await cp("manifest.json", join(pluginDir, "manifest.json"));
+  await cp("packages/plugin/styles.css", join(pluginDir, "styles.css"));
   await writeFile(join(dir, ".obsidian/community-plugins.json"), JSON.stringify(["homebase"]));
   await writeFile(
     join(pluginDir, "data.json"),
@@ -293,6 +294,25 @@ SCENARIOS.push(
     },
   },
 );
+
+SCENARIOS.push({
+  name: "status panel: shows state, progress-free idle and the activity log",
+  run: async () => {
+    await write("a", "status-check.md", "for the activity log\n");
+    await waitFor(async () => (await read("b", "status-check.md")) === "for the activity log\n");
+    await $`open ${"obsidian://homebase?vault=vault-b&do=status"}`.quiet();
+    let names = "";
+    const ok = await waitFor(async () => {
+      const windows = JSON.parse(await $`agent-desktop list-windows --app Obsidian`.quiet().nothrow().text()).data ?? [];
+      const win = (windows as Array<{ id: string; title: string }>).find((w) => w.title.includes("vault-b"));
+      if (!win) return false;
+      names = await $`agent-desktop snapshot --app Obsidian --window-id ${win.id} --compact`.quiet().nothrow().text();
+      return names.includes("Activity") && names.includes("Synced") && names.includes("status-check.md") && names.includes("Sync now");
+    }, 30_000);
+    await $`agent-desktop press escape --app Obsidian`.quiet().nothrow();
+    return [ok, ok ? "" : "panel not found or incomplete"];
+  },
+});
 
 SCENARIOS.push({
   name: "settings sync: snippet, theme, hotkeys and app.json keys reach B; plugin data and workspace stay local",

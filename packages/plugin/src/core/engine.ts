@@ -51,7 +51,41 @@ export interface EngineOptions {
   readonly log?: (message: string) => void;
   /** Called after the engine writes or deletes a local file. */
   readonly onLocalWrite?: (path: string) => void;
+  /** Progress of the current transfer phase (null when it ends). */
+  readonly onProgress?: (progress: Progress | null) => void;
+  /** One entry per user-visible action, for the activity log. */
+  readonly onActivity?: (activity: Activity) => void;
 }
+
+export interface Progress {
+  readonly phase: "download" | "upload";
+  readonly done: number;
+  readonly total: number;
+  readonly bytesDone: number;
+  readonly bytesTotal: number;
+  readonly current?: string;
+}
+
+export type ActivityKind =
+  | "downloaded"
+  | "uploaded"
+  | "deleted-here"
+  | "deleted-remote"
+  | "renamed"
+  | "merged"
+  | "conflict"
+  | "restored";
+
+export interface Activity {
+  readonly kind: ActivityKind;
+  readonly path: string;
+  readonly at: number;
+  readonly detail?: string;
+}
+
+/** Files at least this big are downloaded last, and local edits are pushed between them. */
+const LARGE_BYTES = 1024 * 1024;
+const NOTE_EXT = /\.(md|canvas|base|txt|json)$/i;
 
 export type SyncError = RemoteError | VaultError | CodecError;
 
@@ -88,6 +122,8 @@ export const makeEngine = (options: EngineOptions) =>
     const state: SyncState = yield* store.load;
     const lock = yield* Semaphore.make(1);
     const log = options.log ?? (() => {});
+    const activity = (kind: ActivityKind, path: string, detail?: string) =>
+      options.onActivity?.({ kind, path, at: Date.now(), detail });
 
     const save = store.save(state);
 
@@ -150,6 +186,7 @@ export const makeEngine = (options: EngineOptions) =>
           setBase(path, entry, meta, null);
           state.base[path] = { ...state.base[path]!, size: -1, mtime: stat.mtime };
           log(`merged concurrent edits in ${path}`);
+          activity("merged", path);
           return "merged" as const;
         }
         const copy = conflictPath(path, options.device);
@@ -157,18 +194,18 @@ export const makeEngine = (options: EngineOptions) =>
         const stat = yield* writeLocal(path, theirs);
         setBase(path, entry, meta, stat);
         log(`conflict on ${path}; kept local copy at ${copy}`);
+        activity("conflict", path, copy);
         return "conflict" as const;
       });
 
     // ---------------------------------------------------------------- pull
 
-    const applyRemote = (entry: Entry, report: SyncReport) =>
+    const applyRemote = (entry: Entry, meta: FileMeta, report: SyncReport) =>
       Effect.gen(function* () {
-        const meta = yield* codec.openMeta(entry.path, entry.meta);
         const path = meta.path;
-        if (!options.isSyncable(path)) return;
         const base = state.base[path];
-        if (base && base.pathId === entry.path && base.version === entry.version) return;
+        // Already there (or newer: a local edit pushed mid-pull moved past it).
+        if (base && base.pathId === entry.path && base.version >= entry.version) return;
 
         const local = yield* readLocal(path);
         const localUnchanged = local === null ? base === undefined : base !== undefined && local.hash === base.hash;
@@ -179,6 +216,7 @@ export const makeEngine = (options: EngineOptions) =>
             yield* removeLocal(path);
             delete state.base[path];
             report.pulled++;
+            activity("deleted-here", path);
           } else {
             // Edited here, deleted there: the edit wins; the next push recreates the file.
             delete state.base[path];
@@ -192,6 +230,7 @@ export const makeEngine = (options: EngineOptions) =>
           const stat = yield* writeLocal(path, yield* download(entry.chunks));
           setBase(path, entry, meta, stat);
           report.pulled++;
+          activity("downloaded", path);
           return;
         }
 
@@ -199,15 +238,48 @@ export const makeEngine = (options: EngineOptions) =>
         report[outcome === "merged" ? "merged" : "conflicts"]++;
       });
 
-    const pull = (report: SyncReport) =>
+    /**
+     * Pull remote changes page by page. Each page is planned first (metadata
+     * only) so progress is known, small notes are applied before large
+     * attachments, and local edits (`takeDirty`) are pushed between large
+     * downloads instead of waiting for the whole pull.
+     */
+    const pull = (report: SyncReport, takeDirty?: () => ReadonlySet<string>) =>
       Effect.gen(function* () {
         for (;;) {
           const page = yield* remote.changes(state.cursor);
-          for (const entry of page.entries) yield* applyRemote(entry, report);
+          const work: Array<{ entry: Entry; meta: FileMeta; size: number; small: boolean }> = [];
+          for (const entry of page.entries) {
+            const meta = yield* codec.openMeta(entry.path, entry.meta);
+            if (!options.isSyncable(meta.path)) continue;
+            const base = state.base[meta.path];
+            if (base && base.pathId === entry.path && base.version >= entry.version) continue;
+            const size = entry.deleted ? 0 : meta.size;
+            work.push({ entry, meta, size, small: size < LARGE_BYTES || NOTE_EXT.test(meta.path) });
+          }
+          work.sort((a, b) => Number(b.small) - Number(a.small) || a.size - b.size);
+
+          const total = work.length;
+          const bytesTotal = work.reduce((n, w) => n + w.size, 0);
+          let done = 0;
+          let bytesDone = 0;
+          for (const item of work) {
+            options.onProgress?.({ phase: "download", done, total, bytesDone, bytesTotal, current: item.meta.path });
+            yield* applyRemote(item.entry, item.meta, report);
+            done++;
+            bytesDone += item.size;
+            // Don't make local edits wait behind big downloads.
+            if (!item.small && takeDirty) {
+              const dirty = takeDirty();
+              if (dirty.size > 0) yield* push(dirty, report);
+            }
+          }
+          if (total > 0) options.onProgress?.({ phase: "download", done, total, bytesDone, bytesTotal });
           state.cursor = page.seq;
           yield* save;
-          if (!page.more) return;
+          if (!page.more) break;
         }
+        options.onProgress?.(null);
       });
 
     // ---------------------------------------------------------------- push
@@ -283,6 +355,7 @@ export const makeEngine = (options: EngineOptions) =>
               if (result.ok) {
                 setBase(change.path, result.entries[0]!, metaFor(change), change.stat);
                 report.pushed++;
+                activity("uploaded", change.path);
                 continue;
               }
               const current = result.current;
@@ -305,7 +378,10 @@ export const makeEngine = (options: EngineOptions) =>
             } else if (item.kind === "remove") {
               if (result.ok || result.current === null || result.current.deleted) {
                 delete state.base[item.path];
-                if (result.ok) report.pushed++;
+                if (result.ok) {
+                  report.pushed++;
+                  activity("deleted-remote", item.path);
+                }
                 continue;
               }
               // Edited remotely while we deleted it: the edit wins, restore it.
@@ -313,11 +389,13 @@ export const makeEngine = (options: EngineOptions) =>
               const stat = yield* writeLocal(item.path, yield* download(result.current.chunks));
               setBase(item.path, result.current, meta, stat);
               log(`${item.path} was edited elsewhere; restored instead of deleting`);
+              activity("restored", item.path, "edited elsewhere, so not deleted");
             } else {
               if (result.ok) {
                 delete state.base[item.from];
                 setBase(item.change.path, result.entries[1]!, metaFor(item.change), item.change.stat);
                 report.pushed++;
+                activity("renamed", item.change.path, item.from);
                 continue;
               }
               // Fall back to delete + create.
@@ -370,8 +448,21 @@ export const makeEngine = (options: EngineOptions) =>
             op: { op: "remove", path: base.pathId, baseVersion: base.version, device: options.device },
           });
         }
-        for (const change of changed)
+        const bytesTotal = changed.reduce((n, c) => n + c.bytes.byteLength, 0);
+        let bytesDone = 0;
+        for (const [index, change] of changed.entries()) {
+          options.onProgress?.({
+            phase: "upload",
+            done: index,
+            total: changed.length,
+            bytesDone,
+            bytesTotal,
+            current: change.path,
+          });
           pending.push({ kind: "put", change, op: yield* putOp(change, change.base?.version ?? null) });
+          bytesDone += change.bytes.byteLength;
+        }
+        if (changed.length > 0) options.onProgress?.(null);
 
         let retry = yield* commitAll(pending, report);
         // One retry round for writes whose remote counterpart was deleted meanwhile.
@@ -390,11 +481,16 @@ export const makeEngine = (options: EngineOptions) =>
      * `dirty` paths, or for the whole vault when omitted. A local-only sync
      * with nothing changed makes no network request at all.
      */
-    const sync = (dirty?: ReadonlySet<string>, options: { readonly pull?: boolean } = {}) =>
+    const sync = (
+      dirty?: ReadonlySet<string>,
+      options: { readonly pull?: boolean; readonly takeDirty?: () => ReadonlySet<string> } = {},
+    ) =>
       lock.withPermits(1)(
         Effect.gen(function* () {
           const report: SyncReport = { pulled: 0, pushed: 0, conflicts: 0, merged: 0 };
-          if (options.pull !== false) yield* pull(report);
+          // Local edits first: they never wait behind a long download.
+          if (dirty !== undefined && dirty.size > 0 && options.pull !== false) yield* push(dirty, report);
+          if (options.pull !== false) yield* pull(report, options.takeDirty);
           yield* push(dirty, report);
           // Merged files were rewritten locally; push them on top of the remote version.
           const merged = Object.entries(state.base).filter(([, b]) => b.size === -1).map(([p]) => p);

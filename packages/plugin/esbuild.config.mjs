@@ -11,6 +11,7 @@ const outdir = process.env.OBSIDIAN_VAULT
 await mkdir(outdir, { recursive: true });
 // The manifest lives at the repo root (BRAT and the Obsidian directory read it there).
 await copyFile("../../manifest.json", `${outdir}/manifest.json`);
+await copyFile("styles.css", `${outdir}/styles.css`);
 
 const context = await esbuild.context({
   entryPoints: ["src/main.ts"],

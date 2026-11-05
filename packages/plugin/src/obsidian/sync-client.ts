@@ -137,7 +137,13 @@ export class SyncClient {
     const quiet = !pull && dirty === undefined;
     if (!quiet) this.o.onStatus("syncing");
     try {
-      const report = await Effect.runPromise(this.engine.sync(dirty, { pull }));
+      // Edits made while a long pull runs are handed to the engine between large downloads.
+      const takeDirty = () => {
+        const taken = this.dirty;
+        this.dirty = new Set();
+        return taken;
+      };
+      const report = await Effect.runPromise(this.engine.sync(dirty, { pull, takeDirty }));
       this.o.onReport?.(report);
       this.o.onStatus(this.socket?.readyState === WebSocket.OPEN ? "synced" : "offline");
     } catch (error) {

@@ -1,0 +1,100 @@
+/* Homebase plugin styles (Obsidian theme variables only). */
+
+.homebase-status-head {
+  display: flex;
+  align-items: center;
+  gap: var(--size-4-2);
+  flex-wrap: wrap;
+}
+
+.homebase-status-icon {
+  display: inline-flex;
+  color: var(--text-accent);
+}
+
+.homebase-status-state {
+  font-weight: var(--font-semibold);
+}
+
+.homebase-status-muted {
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+}
+
+.homebase-status-message {
+  margin-top: var(--size-4-2);
+  color: var(--text-warning);
+}
+
+.homebase-progress {
+  margin-top: var(--size-4-3);
+}
+
+.homebase-progress progress {
+  width: 100%;
+}
+
+.homebase-progress-label {
+  font-variant-numeric: tabular-nums;
+  margin-bottom: var(--size-4-1);
+}
+
+.homebase-ellipsis {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.homebase-status-buttons {
+  display: flex;
+  gap: var(--size-4-2);
+  margin-top: var(--size-4-3);
+}
+
+.homebase-activity {
+  max-height: 40vh;
+  overflow-y: auto;
+  font-size: var(--font-ui-small);
+}
+
+.homebase-activity-row {
+  display: grid;
+  grid-template-columns: auto auto 1fr;
+  gap: var(--size-4-2);
+  padding: var(--size-2-1) 0;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.homebase-activity-time {
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.homebase-activity-conflict .homebase-activity-kind {
+  color: var(--text-warning);
+}
+
+/* Version history (history-modal.ts) */
+.homebase-history-preview {
+  margin-top: var(--size-4-3);
+  max-height: 45vh;
+  overflow: auto;
+  font-family: var(--font-monospace);
+  font-size: var(--font-ui-smaller);
+  white-space: pre-wrap;
+}
+
+.homebase-history-title {
+  margin-bottom: var(--size-4-1);
+  font-weight: var(--font-semibold);
+}
+
+.homebase-diff-add {
+  color: var(--color-green);
+  background: rgba(var(--color-green-rgb), 0.1);
+}
+
+.homebase-diff-del {
+  color: var(--color-red);
+  background: rgba(var(--color-red-rgb), 0.1);
+}

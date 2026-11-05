@@ -1,7 +1,7 @@
 {
   "id": "homebase",
   "name": "Homebase",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "minAppVersion": "1.7.2",
   "description": "Self-hosted, end-to-end encrypted, real-time vault sync on your own Cloudflare account.",
   "author": "Julian Archila",
