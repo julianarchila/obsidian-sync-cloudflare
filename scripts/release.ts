@@ -5,7 +5,7 @@
  *   bun run release 0.2.0    # bumps manifest.json + versions.json first (commit the bump yourself)
  *
  * Obsidian/BRAT conventions: the tag equals the manifest version (no "v"),
- * and the release carries main.js and manifest.json.
+ * and the release carries main.js, manifest.json and styles.css.
  */
 import { $ } from "bun";
 
@@ -34,5 +34,5 @@ if ((await $`git tag -l ${version}`.text()).trim()) throw new Error(`Tag ${versi
 
 await $`bun run check`;
 await $`bun run plugin:build`;
-await $`gh release create ${version} packages/plugin/dist/main.js manifest.json --title ${`Homebase ${version}`} --generate-notes`;
+await $`gh release create ${version} packages/plugin/dist/main.js manifest.json packages/plugin/styles.css --title ${`Homebase ${version}`} --generate-notes`;
 console.log(`Released ${version}.`);

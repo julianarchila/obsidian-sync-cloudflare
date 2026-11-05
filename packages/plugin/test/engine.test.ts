@@ -240,3 +240,62 @@ describe("engine: idle cost", () => {
     expect(server.store.current("b.md")?.deleted).toBe(true);
   });
 });
+
+describe("engine: progress and priority", () => {
+  test("download progress counts files and bytes, notes first, attachments last", async () => {
+    const progress: Array<{ done: number; total: number; current?: string }> = [];
+    const { devices: [a] } = await setup(1);
+    const server = a!.remote;
+    a!.write("big.pdf", new Uint8Array(3 * 1024 * 1024).fill(1));
+    a!.write("note1.md", "one");
+    a!.write("note2.md", "two");
+    await a!.sync();
+
+    const { Device } = await import("./harness.ts");
+    const b = await new Device("b", server, {
+      onProgress: (p) => p && progress.push({ done: p.done, total: p.total, current: p.current }),
+    }).start();
+    await b.sync();
+
+    expect(progress[0]?.total).toBe(3);
+    expect(progress.at(-1)).toMatchObject({ done: 3, total: 3 });
+    const order = progress.filter((p) => p.current).map((p) => p.current);
+    expect(order.indexOf("big.pdf")).toBe(2); // after both notes
+  });
+
+  test("a local edit made during a big download is pushed before the download finishes", async () => {
+    const { server, devices: [a] } = await setup(1);
+    for (let i = 0; i < 3; i++) a!.write(`att${i}.pdf`, new Uint8Array(2 * 1024 * 1024).fill(i + 1));
+    await a!.sync();
+
+    const { Device } = await import("./harness.ts");
+    let edited = false;
+    const b = await new Device("b", server).start();
+    b.write("draft.md", "typed while downloading");
+    const takeDirty = () => {
+      if (edited) return new Set<string>();
+      edited = true;
+      return new Set(["draft.md"]);
+    };
+    server.ops = [];
+    await Effect.runPromise(b.engine.sync(undefined, { takeDirty }));
+
+    const firstCommit = server.ops.indexOf("commit");
+    const lastBlob = server.ops.lastIndexOf("getBlob");
+    expect(firstCommit).toBeGreaterThan(-1);
+    expect(firstCommit).toBeLessThan(lastBlob);
+    expect(server.store.current("draft.md")?.deleted).toBe(false);
+  });
+
+  test("activity events describe what happened", async () => {
+    const events: string[] = [];
+    const { devices: [a, b] } = await setup(2, { onActivity: (e) => events.push(`${e.kind}:${e.path}`) });
+    a!.write("x.md", "1");
+    await a!.sync();
+    await b!.sync();
+    a!.remove("x.md");
+    await a!.sync();
+    await b!.sync();
+    expect(events).toEqual(["uploaded:x.md", "downloaded:x.md", "deleted-remote:x.md", "deleted-here:x.md"]);
+  });
+});

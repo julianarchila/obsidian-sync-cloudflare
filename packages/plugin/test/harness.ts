@@ -30,24 +30,29 @@ export class Server {
   online = true;
   /** Every remote call made by any device (to assert idle behaviour). */
   requests = 0;
+  /** Ordered log of remote calls ("getBlob", "commit", …). */
+  ops: string[] = [];
 
   remote(): RemoteShape {
     const raw = this.rawRemote();
-    const count = <A extends unknown[], R>(f: (...a: A) => R) => (...a: A): R => {
-      this.requests++;
-      return f(...a);
-    };
+    const count =
+      <A extends unknown[], R>(f: (...a: A) => R, name = "") =>
+      (...a: A): R => {
+        this.requests++;
+        this.ops.push(name);
+        return f(...a);
+      };
     return {
-      changes: count(raw.changes),
-      commit: count(raw.commit),
-      history: count(raw.history),
+      changes: count(raw.changes, "changes"),
+      commit: count(raw.commit, "commit"),
+      history: count(raw.history, "history"),
       get deleted() {
         return raw.deleted;
       },
-      meta: count(raw.meta),
-      replaceMeta: count(raw.replaceMeta),
-      putBlob: count(raw.putBlob),
-      getBlob: count(raw.getBlob),
+      meta: count(raw.meta, "meta"),
+      replaceMeta: count(raw.replaceMeta, "replaceMeta"),
+      putBlob: count(raw.putBlob, "putBlob"),
+      getBlob: count(raw.getBlob, "getBlob"),
     };
   }
 

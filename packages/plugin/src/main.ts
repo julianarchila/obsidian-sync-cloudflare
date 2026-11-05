@@ -1,4 +1,4 @@
-import { type App, Notice, Platform, Plugin, PluginSettingTab, Setting, type TAbstractFile, TFile } from "obsidian";
+import { type App, Notice, Platform, Plugin, PluginSettingTab, Setting, setIcon, type TAbstractFile, TFile } from "obsidian";
 import * as Effect from "effect/Effect";
 import * as Base64 from "effect/encoding/Base64";
 import * as Result from "effect/Result";
@@ -11,6 +11,8 @@ import { mergeText } from "./core/merge.ts";
 import { changeVaultPassword, unlockVault } from "./core/unlock.ts";
 import { combinedVaultIo, obsidianConfigIo, obsidianHttp, obsidianLocalState, obsidianVaultIo } from "./obsidian/adapters.ts";
 import { DeletedFilesModal, HistoryModal } from "./obsidian/history-modal.ts";
+import { formatBytes, formatProgress, STATE_ICON, STATE_LABEL, type SyncState, SyncStatus } from "./obsidian/status.ts";
+import { StatusModal } from "./obsidian/status-modal.ts";
 import { SyncClient } from "./obsidian/sync-client.ts";
 
 interface Settings {
@@ -53,8 +55,12 @@ export default class CloudflareSyncPlugin extends Plugin {
   /** Unlocked vault key, kept in memory for this session (for password changes). */
   private vaultKey: Uint8Array | undefined;
   private client: SyncClient | undefined;
-  private status!: HTMLElement;
+  readonly sync = new SyncStatus();
+  private statusBar!: HTMLElement;
+  private ribbon!: HTMLElement;
   private reloadNotice: number | undefined;
+  /** A long transfer in progress (announced with a notice when it starts and ends). */
+  private bigTransfer = false;
 
   get conf() {
     return this.data.settings;
@@ -79,7 +85,14 @@ export default class CloudflareSyncPlugin extends Plugin {
       selectiveFingerprint: stored?.selectiveFingerprint,
     };
 
-    this.status = this.addStatusBarItem();
+    // Status: ribbon icon (also on mobile, where plugin status bar items are hidden) + desktop status bar.
+    this.statusBar = this.addStatusBarItem();
+    this.statusBar.addClass("mod-clickable");
+    this.statusBar.onclick = () => this.openStatus();
+    this.ribbon = this.addRibbonIcon(STATE_ICON["not-configured"], "Homebase", () => this.openStatus());
+    this.register(this.sync.subscribe(() => this.renderStatus()));
+    this.renderStatus();
+    this.addCommand({ id: "show-status", name: "Show sync status", callback: () => this.openStatus() });
     this.addSettingTab(new SettingsTab(this.app, this));
     this.addCommand({ id: "full-sync", name: "Sync now", callback: () => void this.client?.fullSync() });
     this.addCommand({ id: "reconnect", name: "Reconnect", callback: () => void this.restart() });
@@ -111,13 +124,14 @@ export default class CloudflareSyncPlugin extends Plugin {
         menu.addItem((item) => item.setTitle("Version history").setIcon("history").onClick(() => this.openHistory(file.path)));
       }),
     );
-    // obsidian://homebase?vault=<name>&do=history&file=Note.md  |  do=deleted  |  do=sync
+    // obsidian://homebase?vault=<name>&do=history&file=Note.md  |  do=deleted  |  do=sync  |  do=status
     // `action` is always the protocol name (hence `do`), and Obsidian treats a `path`
     // parameter as an absolute filesystem path to pick the vault (hence `file`).
     this.registerObsidianProtocolHandler("homebase", (params) => {
       if (params.do === "history" && params.file) this.openHistory(params.file);
       if (params.do === "deleted") this.openDeleted();
       if (params.do === "sync") void this.client?.fullSync();
+      if (params.do === "status") this.openStatus();
     });
 
     // Register vault listeners only after startup, otherwise `create` fires for every file.
@@ -203,8 +217,37 @@ export default class CloudflareSyncPlugin extends Plugin {
     if (run) new DeletedFilesModal(this.app, run, (p) => this.client?.markDirty(p)).open();
   }
 
-  setStatus(text: string) {
-    this.status.setText(`☁ ${text}`);
+  setState(state: SyncState, message = "") {
+    this.sync.setState(state, message);
+  }
+
+  openStatus() {
+    new StatusModal(this.app, this.sync, {
+      syncNow: () => void this.client?.fullSync(),
+      reconnect: () => void this.restart(),
+    }).open();
+  }
+
+  private renderStatus() {
+    const { state, progress } = this.sync;
+    const label = progress && progress.total > 0 ? formatProgress(progress) : STATE_LABEL[state];
+    this.statusBar.setText(`☁ ${label}`);
+    setIcon(this.ribbon, progress ? "refresh-cw" : STATE_ICON[state]);
+    this.ribbon.setAttribute("aria-label", `Homebase: ${label}`);
+  }
+
+  /** Announce long transfers so a first sync on a phone is never silent. */
+  private onProgress(progress: import("./core/engine.ts").Progress | null) {
+    if (progress && !this.bigTransfer && (progress.total >= 20 || progress.bytesTotal >= 5 * 1024 * 1024)) {
+      this.bigTransfer = true;
+      const verb = progress.phase === "download" ? "Downloading" : "Uploading";
+      new Notice(`Homebase: ${verb} ${progress.total} files (${formatBytes(progress.bytesTotal)}). Tap the cloud icon to follow progress.`, 8000);
+    }
+    if (!progress && this.bigTransfer) {
+      this.bigTransfer = false;
+      new Notice("Homebase: sync complete.", 5000);
+    }
+    this.sync.setProgress(progress);
   }
 
   get stateFile() {
@@ -219,10 +262,10 @@ export default class CloudflareSyncPlugin extends Plugin {
     this.client?.stop();
     this.client = undefined;
     const { serverUrl, vaultId, token, device } = this.conf;
-    if (!serverUrl || !vaultId || !token) return this.setStatus("not configured");
+    if (!serverUrl || !vaultId || !token) return this.setState("not-configured");
 
     // ---- unlock end-to-end encryption
-    this.setStatus("unlocking…");
+    this.setState("unlocking");
     const remote = makeHttpRemote({ serverUrl, vaultId, token, http: obsidianHttp });
     const remembered = this.data.key ? Result.getOrUndefined(Base64.decode(this.data.key)) : undefined;
     const unlocked = await Effect.runPromise(
@@ -241,7 +284,7 @@ export default class CloudflareSyncPlugin extends Plugin {
               : error.isNewVault
                 ? "New vault: set a password in settings to create it."
                 : "Enter the vault password in settings.";
-      this.setStatus(error._tag === "RemoteError" ? "offline" : "🔒 locked");
+      this.setState(error._tag === "RemoteError" ? "offline" : "locked", this.lockMessage);
       if (error._tag !== "RemoteError") new Notice(`Homebase: ${this.lockMessage}`);
       return;
     }
@@ -279,6 +322,8 @@ export default class CloudflareSyncPlugin extends Plugin {
         })(),
         // Config JSON merges by key; Markdown gets a three-way merge; the rest keeps both copies.
         merge: (input) => mergeConfig(configDir)(input) ?? mergeText(input),
+        onProgress: (progress) => this.onProgress(progress),
+        onActivity: (activity) => this.sync.add(activity),
         onLocalWrite: (path) => {
           if (path.startsWith(`${configDir}/`)) this.settingsChangedRemotely();
         },
@@ -287,8 +332,8 @@ export default class CloudflareSyncPlugin extends Plugin {
           if (message.startsWith("conflict") || message.startsWith("merged")) new Notice(`Homebase: ${message}`);
         },
       },
-      onStatus: (status) => this.setStatus(status),
-      onError: (message) => console.warn(`[homebase] ${message}`),
+      onStatus: (status) => this.setState(status as SyncState),
+      onError: (message) => this.setState("offline", message),
     });
     await this.client.start();
   }

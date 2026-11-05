@@ -43,8 +43,7 @@ export class HistoryModal extends Modal {
         return;
       }
       const list = contentEl.createDiv();
-      const preview = contentEl.createDiv({ cls: "oscf-preview" });
-      preview.style.cssText = "margin-top:12px;max-height:45vh;overflow:auto;font-family:var(--font-monospace);font-size:12px;white-space:pre-wrap;";
+      const preview = contentEl.createDiv({ cls: "homebase-history-preview" });
       const current = versions.find((v) => !v.deleted);
       for (const v of versions) this.row(list, v, current, preview);
     } catch (error) {
@@ -76,11 +75,12 @@ export class HistoryModal extends Modal {
           preview.setText(oldText);
           return;
         }
-        preview.createDiv({ text: `Changes from current to v${v.version}:` }).style.cssText = "margin-bottom:6px;font-weight:600;";
+        preview.createDiv({ cls: "homebase-history-title", text: `Changes from current to v${v.version}:` });
         for (const line of diff) {
-          const el = preview.createDiv({ text: `${line.kind === "add" ? "+" : line.kind === "del" ? "-" : " "} ${line.text.replace(/\n$/, "")}` });
-          if (line.kind === "add") el.style.cssText = "color:var(--color-green);background:rgba(var(--color-green-rgb),0.1);";
-          if (line.kind === "del") el.style.cssText = "color:var(--color-red);background:rgba(var(--color-red-rgb),0.1);";
+          preview.createDiv({
+            cls: line.kind === "add" ? "homebase-diff-add" : line.kind === "del" ? "homebase-diff-del" : "",
+            text: `${line.kind === "add" ? "+" : line.kind === "del" ? "-" : " "} ${line.text.replace(/\n$/, "")}`,
+          });
         }
       }),
     );

@@ -29,6 +29,7 @@ Homebase plugin ──HTTPS──▶ Worker ──▶ R2                encrypte
 ```
 
 - **Change log.** Each vault is a Durable Object holding one SQLite row per file version and a global cursor. Devices catch up with "changes since my cursor". Every write is a compare-and-swap on the file's version, so concurrent edits are detected rather than lost.
+- **Big first syncs stay usable.** Notes download before large attachments, and edits you make during a long download are uploaded between files instead of waiting for it to finish.
 - **Real time with no idle cost.** The plugin keeps a WebSocket open, and the server pushes a notice when something changes. Idle connections hibernate, and keep-alive pings are answered without waking the Durable Object. An open but idle Obsidian makes **zero billable requests**.
 - **Encryption.** See [Security](#security).
 - **Conflicts.**
@@ -99,16 +100,17 @@ Each device can choose to remember the derived key, which never includes the pas
 
 ## Using it
 
+- **Sync status:** tap the cloud icon in the ribbon (on mobile, in the left sidebar) to open the status panel. It shows the current state, a progress bar with files and MB for long transfers, the last sync time, and an activity log of what was downloaded, uploaded, deleted, merged or kept as a conflict. On desktop the status bar shows the same progress. Long transfers announce their start and end with a notice.
 - **Version history:** right-click a file, then *Version history*, or use the command palette. It shows every version, a diff against the current one, and *Restore*.
 - **Recover deleted files:** command *Recover deleted files*.
 - **Selective sync and settings sync:** *Settings → Homebase*. Changes from other devices to settings apply after reloading Obsidian.
 - **Change vault password:** *Settings → Homebase*.
-- **URIs:** `obsidian://homebase?vault=<name>&do=history&file=<path>`, `do=deleted`, `do=sync`.
+- **URIs:** `obsidian://homebase?vault=<name>&do=history&file=<path>`, `do=deleted`, `do=sync`, `do=status`.
 - **Verify your backup:** `bun scripts/verify-restore.ts <vault-id> <local-vault-folder> <password-file>` downloads and decrypts the whole vault as a new device would, then compares it byte for byte with your local copy. Instead of a password file you can pass the device's `.obsidian/plugins/homebase/data.json`, which holds the remembered key.
 
 ## Limitations
 
-- **Desktop only so far.** It is developed and tested on desktop (macOS). Mobile should work through the same Obsidian APIs, but it is untested.
+- **Tested on desktop (macOS) and Android** (emulator, Obsidian 1.15). iOS should work through the same APIs, but it is untested. On mobile, Obsidian only syncs while the app is open.
 - **One deploy token per deployment.** There are no per-user accounts or shared vaults.
 - **No interoperability with Obsidian Sync.** Pick one.
 - **Never synced:** plugin caches (`plugins/*/cache`), workspace layouts, and Homebase's own settings, which hold the token and key.
