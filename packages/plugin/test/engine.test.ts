@@ -194,7 +194,7 @@ describe("engine: offline", () => {
     for (let i = 0; i < 50; i++) a!.write(`f${i}.md`, `v${i}`);
     await a!.sync();
     const report = await a!.sync();
-    expect(report).toEqual({ pulled: 0, pushed: 0, conflicts: 0, merged: 0 });
+    expect(report).toEqual({ pulled: 0, pushed: 0, conflicts: 0, merged: 0, skipped: 0 });
   });
 });
 
@@ -297,5 +297,39 @@ describe("engine: progress and priority", () => {
     await a!.sync();
     await b!.sync();
     expect(events).toEqual(["uploaded:x.md", "downloaded:x.md", "deleted-remote:x.md", "deleted-here:x.md"]);
+  });
+});
+
+describe("engine: files this device can't write", () => {
+  test("an invalid name on this device is skipped; everything else syncs and nothing is deleted", async () => {
+    const { server, devices: [mac] } = await setup(1);
+    mac!.write('Clippings/Farhan on X "Modal".md', "quoted");
+    mac!.write("Clippings/Is it S3?.md", "question");
+    mac!.write("Clippings/normal.md", "fine");
+    mac!.write("note.md", "fine too");
+    await mac!.sync();
+
+    // An "Android" device whose filesystem rejects \ : * ? < > " |
+    const { Device } = await import("./harness.ts");
+    const events: string[] = [];
+    const android = await new Device("android", server, { onActivity: (e) => events.push(`${e.kind}:${e.path}`) }).start();
+    const realWrite = android.files.set.bind(android.files);
+    android.files.set = (path, value) => {
+      if (/[\\:*?<>"|]/.test(path)) throw new Error("File name cannot contain any of the following characters");
+      return realWrite(path, value);
+    };
+
+    const report = await android.sync();
+    expect(report.skipped).toBe(2);
+    expect(android.snapshot()).toEqual({ "Clippings/normal.md": "fine", "note.md": "fine too" });
+    expect(events.filter((e) => e.startsWith("skipped")).sort()).toEqual([
+      'skipped:Clippings/Farhan on X "Modal".md',
+      "skipped:Clippings/Is it S3?.md",
+    ]);
+
+    // A later sync neither retries forever nor deletes the skipped files remotely.
+    expect((await android.sync()).skipped).toBe(0);
+    expect(server.store.current('Clippings/Farhan on X "Modal".md')?.deleted).toBe(false);
+    expect(server.store.current("Clippings/Is it S3?.md")?.deleted).toBe(false);
   });
 });

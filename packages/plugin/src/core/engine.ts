@@ -74,7 +74,8 @@ export type ActivityKind =
   | "renamed"
   | "merged"
   | "conflict"
-  | "restored";
+  | "restored"
+  | "skipped";
 
 export interface Activity {
   readonly kind: ActivityKind;
@@ -94,6 +95,8 @@ export interface SyncReport {
   pushed: number;
   conflicts: number;
   merged: number;
+  /** Remote files this device could not write (e.g. a name its filesystem rejects). */
+  skipped: number;
 }
 
 interface LocalChange {
@@ -265,7 +268,17 @@ export const makeEngine = (options: EngineOptions) =>
           let bytesDone = 0;
           for (const item of work) {
             options.onProgress?.({ phase: "download", done, total, bytesDone, bytesTotal, current: item.meta.path });
-            yield* applyRemote(item.entry, item.meta, report);
+            // One file this device can't write (e.g. `?` or `"` in its name on Android/Windows)
+            // must not block the rest of the vault: skip it, report it, keep going.
+            yield* applyRemote(item.entry, item.meta, report).pipe(
+              Effect.catchTag("VaultError", (error) =>
+                Effect.sync(() => {
+                  report.skipped++;
+                  log(`skipped ${item.meta.path}: ${error.message}`);
+                  activity("skipped", item.meta.path, error.message);
+                }),
+              ),
+            );
             done++;
             bytesDone += item.size;
             // Don't make local edits wait behind big downloads.
@@ -487,7 +500,7 @@ export const makeEngine = (options: EngineOptions) =>
     ) =>
       lock.withPermits(1)(
         Effect.gen(function* () {
-          const report: SyncReport = { pulled: 0, pushed: 0, conflicts: 0, merged: 0 };
+          const report: SyncReport = { pulled: 0, pushed: 0, conflicts: 0, merged: 0, skipped: 0 };
           // Local edits first: they never wait behind a long download.
           if (dirty !== undefined && dirty.size > 0 && options.pull !== false) yield* push(dirty, report);
           if (options.pull !== false) yield* pull(report, options.takeDirty);

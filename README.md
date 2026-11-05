@@ -113,6 +113,7 @@ Each device can choose to remember the derived key, which never includes the pas
 - **Tested on desktop (macOS) and Android** (emulator, Obsidian 1.15). iOS should work through the same APIs, but it is untested. On mobile, Obsidian only syncs while the app is open.
 - **One deploy token per deployment.** There are no per-user accounts or shared vaults.
 - **No interoperability with Obsidian Sync.** Pick one.
+- **File names:** Android and Windows don't allow `\ / : * ? < > " |` in file names, but macOS does. Files whose names a device can't store are skipped on that device, and listed in the status panel and activity log, while everything else keeps syncing. Rename them (for example on the Mac) to sync them there. The Obsidian Web Clipper's `safe_name` filter avoids such names.
 - **Never synced:** plugin caches (`plugins/*/cache`), workspace layouts, and Homebase's own settings, which hold the token and key.
 
 ## Development
