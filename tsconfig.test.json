@@ -1,0 +1,1 @@
+{ "extends": "./tsconfig.base.json", "compilerOptions": { "types": ["bun"] }, "include": ["scripts", "packages/*/src/**/*.test.ts", "packages/server/src/sql-bun.ts", "packages/plugin/test"] }

@@ -1,0 +1,3 @@
+[install]
+# Alchemy's CLI resolves its peer deps (@effect/platform-*) from the project root.
+linker = "hoisted"

@@ -1,0 +1,8 @@
+node_modules/
+.alchemy/
+.env
+.env.*
+!.env.example
+packages/plugin/dist/
+*.log
+.DS_Store

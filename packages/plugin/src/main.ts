@@ -1,0 +1,437 @@
+import { type App, Notice, Platform, Plugin, PluginSettingTab, Setting, type TAbstractFile, TFile } from "obsidian";
+import * as Effect from "effect/Effect";
+import * as Base64 from "effect/encoding/Base64";
+import * as Result from "effect/Result";
+
+import { type ConfigSyncSettings, DEFAULT_CONFIG_SYNC, makeIsConfigSyncable, mergeConfig } from "./core/config.ts";
+import { makeCryptoCodec } from "./core/crypto-codec.ts";
+import { DEFAULT_SELECTIVE, makeIsSyncable, type SelectiveSettings, selectiveFingerprint } from "./core/filter.ts";
+import { makeHttpRemote } from "./core/http-remote.ts";
+import { mergeText } from "./core/merge.ts";
+import { changeVaultPassword, unlockVault } from "./core/unlock.ts";
+import { combinedVaultIo, obsidianConfigIo, obsidianHttp, obsidianLocalState, obsidianVaultIo } from "./obsidian/adapters.ts";
+import { DeletedFilesModal, HistoryModal } from "./obsidian/history-modal.ts";
+import { SyncClient } from "./obsidian/sync-client.ts";
+
+interface Settings {
+  serverUrl: string;
+  vaultId: string;
+  token: string;
+  device: string;
+  /** Keep the derived key on this device so the password isn't asked again. */
+  rememberKey: boolean;
+  selective: SelectiveSettings;
+  /** Which parts of the config dir (.obsidian) this device syncs. */
+  configSync: ConfigSyncSettings;
+}
+
+interface Data {
+  settings: Settings;
+  /** Derived master key (base64), only when `rememberKey`. Never the password. */
+  key?: string;
+  /** Selective-sync fingerprint of the last run; a change triggers a full index re-read. */
+  selectiveFingerprint?: string;
+}
+
+const DEFAULTS: Settings = {
+  serverUrl: "",
+  vaultId: "",
+  token: "",
+  device: Platform.isMobile ? "mobile" : "desktop",
+  rememberKey: true,
+  selective: DEFAULT_SELECTIVE,
+  configSync: DEFAULT_CONFIG_SYNC,
+};
+
+const CONFIG_POLL_MS = 30_000;
+
+export default class CloudflareSyncPlugin extends Plugin {
+  data: Data = { settings: { ...DEFAULTS } };
+  /** Entered in settings; used once to unlock, never stored. */
+  password: string | undefined;
+  lockMessage = "";
+  /** Unlocked vault key, kept in memory for this session (for password changes). */
+  private vaultKey: Uint8Array | undefined;
+  private client: SyncClient | undefined;
+  private status!: HTMLElement;
+  private reloadNotice: number | undefined;
+
+  get conf() {
+    return this.data.settings;
+  }
+
+  override async onload() {
+    const stored = (await this.loadData()) as (Partial<Data> & { settings?: Partial<Settings> & { password?: string } }) | null;
+    // A one-shot `password` in data.json (automation) is consumed and removed.
+    this.password = stored?.settings?.password;
+    const { password: _ignored, ...settings }: Partial<Settings> & { password?: string } = stored?.settings ?? {};
+    this.data = {
+      settings: {
+        ...DEFAULTS,
+        ...settings,
+        selective: {
+          excludedFolders: settings.selective?.excludedFolders ?? [],
+          types: { ...DEFAULT_SELECTIVE.types, ...settings.selective?.types },
+        },
+        configSync: { ...DEFAULT_CONFIG_SYNC, ...settings.configSync },
+      },
+      key: stored?.key,
+      selectiveFingerprint: stored?.selectiveFingerprint,
+    };
+
+    this.status = this.addStatusBarItem();
+    this.addSettingTab(new SettingsTab(this.app, this));
+    this.addCommand({ id: "full-sync", name: "Sync now", callback: () => void this.client?.fullSync() });
+    this.addCommand({ id: "reconnect", name: "Reconnect", callback: () => void this.restart() });
+    this.addCommand({
+      id: "forget-key",
+      name: "Lock vault (forget key on this device)",
+      callback: async () => {
+        delete this.data.key;
+        await this.saveData(this.data);
+        await this.restart();
+      },
+    });
+
+    // ---- version history and recovery (M4)
+    this.addCommand({
+      id: "file-history",
+      name: "Show version history of current file",
+      checkCallback: (checking) => {
+        const file = this.app.workspace.getActiveFile();
+        if (!file || !this.client) return false;
+        if (!checking) this.openHistory(file.path);
+        return true;
+      },
+    });
+    this.addCommand({ id: "deleted-files", name: "Recover deleted files", callback: () => this.openDeleted() });
+    this.registerEvent(
+      this.app.workspace.on("file-menu", (menu, file) => {
+        if (!(file instanceof TFile) || !this.client) return;
+        menu.addItem((item) => item.setTitle("Version history").setIcon("history").onClick(() => this.openHistory(file.path)));
+      }),
+    );
+    // obsidian://homebase?vault=<name>&do=history&file=Note.md  |  do=deleted  |  do=sync
+    // `action` is always the protocol name (hence `do`), and Obsidian treats a `path`
+    // parameter as an absolute filesystem path to pick the vault (hence `file`).
+    this.registerObsidianProtocolHandler("homebase", (params) => {
+      if (params.do === "history" && params.file) this.openHistory(params.file);
+      if (params.do === "deleted") this.openDeleted();
+      if (params.do === "sync") void this.client?.fullSync();
+    });
+
+    // Register vault listeners only after startup, otherwise `create` fires for every file.
+    this.app.workspace.onLayoutReady(() => {
+      const dirty = (file: TAbstractFile) => this.client?.markDirty(file.path);
+      this.registerEvent(this.app.vault.on("create", dirty));
+      this.registerEvent(this.app.vault.on("modify", dirty));
+      this.registerEvent(this.app.vault.on("delete", dirty));
+      this.registerEvent(this.app.vault.on("rename", (file, old) => this.client?.markDirty(file.path, old)));
+      // The config dir has no vault events: poll it (stat-only unless something changed).
+      this.registerInterval(window.setInterval(() => void this.pollConfig(), CONFIG_POLL_MS));
+      void this.restart();
+    });
+  }
+
+  override onunload() {
+    this.client?.stop();
+  }
+
+  private async pollConfig() {
+    const client = this.client;
+    if (!client?.engine) return;
+    const configDir = this.app.vault.configDir;
+    const adapter = this.app.vault.adapter;
+    const listAll = async (dir: string): Promise<string[]> => {
+      if (!(await adapter.exists(dir))) return [];
+      const { files, folders } = await adapter.list(dir);
+      return [...files, ...(await Promise.all(folders.map(listAll))).flat()];
+    };
+    const known = Object.keys(client.engine.state.base).filter((p) => p.startsWith(`${configDir}/`));
+    // Stat-only comparison against the last sync: no hashing and no network unless something changed.
+    const changed = await Effect.runPromise(client.engine.changedLocally([...(await listAll(configDir)), ...known]));
+    if (changed.length > 0) client.markDirty(...changed);
+  }
+
+  /** Settings written by another device apply after a reload. */
+  private settingsChangedRemotely() {
+    window.clearTimeout(this.reloadNotice);
+    this.reloadNotice = window.setTimeout(
+      () => new Notice("Homebase: settings were updated from another device. Reload Obsidian to apply them.", 10_000),
+      3000,
+    );
+  }
+
+  get unlocked() {
+    return this.vaultKey !== undefined;
+  }
+
+  /** Re-wrap the vault key with a new password. Nothing is re-encrypted; other devices keep working. */
+  async changePassword(newPassword: string) {
+    const { serverUrl, vaultId, token } = this.conf;
+    if (!this.vaultKey) throw new Error("Unlock the vault first.");
+    const remote = makeHttpRemote({ serverUrl, vaultId, token, http: obsidianHttp });
+    const result = await Effect.runPromise(changeVaultPassword(remote, this.vaultKey, newPassword).pipe(Effect.result));
+    if (result._tag === "Failure") {
+      const e = result.failure;
+      throw new Error(
+        e._tag === "RemoteError"
+          ? `Server unreachable: ${e.message}`
+          : e.reason === "Concurrent"
+            ? "The password was changed on another device at the same time. Reconnect and try again."
+            : "This device's key does not match the vault anymore.",
+      );
+    }
+  }
+
+  private runner() {
+    const client = this.client;
+    if (!client) {
+      new Notice("Homebase is not connected.");
+      return null;
+    }
+    return <A, E>(effect: Parameters<typeof client.withServices<A, E>>[0]) => client.withServices(effect);
+  }
+
+  openHistory(path: string) {
+    const run = this.runner();
+    if (run) new HistoryModal(this.app, path, run, (p) => this.client?.markDirty(p)).open();
+  }
+
+  openDeleted() {
+    const run = this.runner();
+    if (run) new DeletedFilesModal(this.app, run, (p) => this.client?.markDirty(p)).open();
+  }
+
+  setStatus(text: string) {
+    this.status.setText(`☁ ${text}`);
+  }
+
+  get stateFile() {
+    return `${this.manifest.dir}/state-${this.conf.vaultId}.json`;
+  }
+
+  async saveSettings() {
+    await this.saveData(this.data);
+  }
+
+  async restart() {
+    this.client?.stop();
+    this.client = undefined;
+    const { serverUrl, vaultId, token, device } = this.conf;
+    if (!serverUrl || !vaultId || !token) return this.setStatus("not configured");
+
+    // ---- unlock end-to-end encryption
+    this.setStatus("unlocking…");
+    const remote = makeHttpRemote({ serverUrl, vaultId, token, http: obsidianHttp });
+    const remembered = this.data.key ? Result.getOrUndefined(Base64.decode(this.data.key)) : undefined;
+    const unlocked = await Effect.runPromise(
+      unlockVault(remote, { password: this.password, rememberedKey: remembered }).pipe(Effect.result),
+    );
+    this.password = undefined;
+    if (unlocked._tag === "Failure") {
+      const error = unlocked.failure;
+      this.lockMessage =
+        error._tag === "RemoteError"
+          ? `Server unreachable: ${error.message}`
+          : error.reason === "WrongPassword"
+            ? "Wrong vault password."
+            : error.reason === "BadRecord"
+              ? "The vault's encryption record is unreadable."
+              : error.isNewVault
+                ? "New vault: set a password in settings to create it."
+                : "Enter the vault password in settings.";
+      this.setStatus(error._tag === "RemoteError" ? "offline" : "🔒 locked");
+      if (error._tag !== "RemoteError") new Notice(`Homebase: ${this.lockMessage}`);
+      return;
+    }
+    this.lockMessage = "";
+    this.vaultKey = unlocked.success.master;
+    if (unlocked.success.created) new Notice("Homebase: vault created and encrypted with your password.");
+    if (this.conf.rememberKey) this.data.key = Base64.encode(unlocked.success.master);
+    else delete this.data.key;
+    await this.saveData(this.data);
+
+    // ---- start syncing
+    const codec = await Effect.runPromise(makeCryptoCodec(unlocked.success.master));
+    const pluginDir = this.manifest.dir ?? "";
+    const configDir = this.app.vault.configDir;
+    const fingerprint = `${selectiveFingerprint(this.conf.selective)}|${JSON.stringify(this.conf.configSync)}`;
+    const resetCursor = this.data.selectiveFingerprint !== undefined && this.data.selectiveFingerprint !== fingerprint;
+    this.data.selectiveFingerprint = fingerprint;
+    await this.saveData(this.data);
+    this.client = new SyncClient({
+      serverUrl,
+      vaultId,
+      token,
+      vaultIo: combinedVaultIo(obsidianVaultIo(this.app), obsidianConfigIo(this.app, configDir), configDir),
+      localState: obsidianLocalState(this.app, this.stateFile),
+      codec,
+      resetCursor,
+      engine: {
+        device,
+        // Notes: selective sync. Config dir: per-category settings sync, never this plugin's
+        // own files (token, key, sync state) nor per-device workspace layouts.
+        isSyncable: (() => {
+          const notes = makeIsSyncable(this.conf.selective, [pluginDir]);
+          const config = makeIsConfigSyncable(configDir, this.conf.configSync, this.manifest.id);
+          return (path: string) => (path.startsWith(`${configDir}/`) ? config(path) : notes(path));
+        })(),
+        // Config JSON merges by key; Markdown gets a three-way merge; the rest keeps both copies.
+        merge: (input) => mergeConfig(configDir)(input) ?? mergeText(input),
+        onLocalWrite: (path) => {
+          if (path.startsWith(`${configDir}/`)) this.settingsChangedRemotely();
+        },
+        log: (message) => {
+          console.log(`[homebase] ${message}`);
+          if (message.startsWith("conflict") || message.startsWith("merged")) new Notice(`Homebase: ${message}`);
+        },
+      },
+      onStatus: (status) => this.setStatus(status),
+      onError: (message) => console.warn(`[homebase] ${message}`),
+    });
+    await this.client.start();
+  }
+}
+
+class SettingsTab extends PluginSettingTab {
+  constructor(
+    app: App,
+    private readonly plugin: CloudflareSyncPlugin,
+  ) {
+    super(app, plugin);
+  }
+
+  display() {
+    const { containerEl } = this;
+    const settings = this.plugin.conf;
+    containerEl.empty();
+
+    const text = (name: string, desc: string, key: "serverUrl" | "vaultId" | "token" | "device", secret = false) =>
+      new Setting(containerEl)
+        .setName(name)
+        .setDesc(desc)
+        .addText((input) => {
+          if (secret) input.inputEl.type = "password";
+          input.setValue(settings[key]).onChange((value) => {
+            settings[key] = value.trim();
+          });
+        });
+
+    text("Server URL", "The URL printed by `bun run deploy`.", "serverUrl");
+    text("Vault id", "Lowercase letters, numbers, - and _. Use the same id on every device.", "vaultId");
+    text("Token", "The OSCF_TOKEN you deployed with.", "token", true);
+    text("Device name", "Shown in conflict file names.", "device");
+
+    new Setting(containerEl).setHeading().setName("Encryption");
+    if (this.plugin.lockMessage) containerEl.createEl("p", { text: this.plugin.lockMessage, cls: "mod-warning" });
+    new Setting(containerEl)
+      .setName("Vault password")
+      .setDesc(
+        "Everything is encrypted on this device before upload. On a new vault this sets the password; " +
+          "if you lose it, your data cannot be recovered.",
+      )
+      .addText((input) => {
+        input.inputEl.type = "password";
+        input.setPlaceholder(this.plugin.data.key ? "Unlocked (key remembered)" : "Enter password");
+        input.onChange((value) => {
+          this.plugin.password = value;
+        });
+      });
+    new Setting(containerEl)
+      .setName("Remember key on this device")
+      .setDesc("Stores the derived key (not the password) in this plugin's data.")
+      .addToggle((toggle) =>
+        toggle.setValue(settings.rememberKey).onChange((value) => {
+          settings.rememberKey = value;
+        }),
+      );
+
+    let nextPassword = "";
+    let confirmPassword = "";
+    new Setting(containerEl)
+      .setName("Change vault password")
+      .setDesc(
+        "Re-wraps the vault key: nothing is re-encrypted and your other devices keep syncing. New devices will need the new password.",
+      )
+      .addText((input) => {
+        input.inputEl.type = "password";
+        input.setPlaceholder("New password").onChange((v) => (nextPassword = v));
+      })
+      .addText((input) => {
+        input.inputEl.type = "password";
+        input.setPlaceholder("Confirm").onChange((v) => (confirmPassword = v));
+      })
+      .addButton((button) =>
+        button
+          .setButtonText("Change password")
+          .setDisabled(!this.plugin.unlocked)
+          .onClick(async () => {
+            if (nextPassword.length < 8) return new Notice("Use at least 8 characters.");
+            if (nextPassword !== confirmPassword) return new Notice("The passwords don't match.");
+            try {
+              await this.plugin.changePassword(nextPassword);
+              new Notice("Vault password changed.");
+              this.display();
+            } catch (error) {
+              new Notice(`Could not change the password: ${error instanceof Error ? error.message : String(error)}`);
+            }
+          }),
+      );
+
+    new Setting(containerEl).setHeading().setName("Selective sync");
+    new Setting(containerEl)
+      .setName("Excluded folders")
+      .setDesc("One folder per line. Excluded files are neither uploaded nor downloaded, and are left untouched here.")
+      .addTextArea((area) => {
+        area.inputEl.rows = 4;
+        area.setPlaceholder("Private\nAttachments/raw");
+        area.setValue(settings.selective.excludedFolders.join("\n")).onChange((value) => {
+          settings.selective = {
+            ...settings.selective,
+            excludedFolders: value.split("\n").map((l) => l.trim()).filter(Boolean),
+          };
+        });
+      });
+    const typeToggle = (key: keyof SelectiveSettings["types"], name: string) =>
+      new Setting(containerEl).setName(name).addToggle((toggle) =>
+        toggle.setValue(settings.selective.types[key]).onChange((value) => {
+          settings.selective = { ...settings.selective, types: { ...settings.selective.types, [key]: value } };
+        }),
+      );
+    typeToggle("images", "Sync images");
+    typeToggle("audio", "Sync audio");
+    typeToggle("video", "Sync videos");
+    typeToggle("pdf", "Sync PDFs");
+    typeToggle("other", "Sync other file types");
+
+    new Setting(containerEl).setHeading().setName("Settings sync");
+    containerEl.createEl("p", {
+      text: "Sync parts of your Obsidian configuration. This plugin's own data and workspace layouts never sync. Changes from other devices apply after reloading Obsidian.",
+      cls: "setting-item-description",
+    });
+    const configToggle = (key: keyof ConfigSyncSettings, name: string) =>
+      new Setting(containerEl).setName(name).addToggle((toggle) =>
+        toggle.setValue(settings.configSync[key]).onChange((value) => {
+          settings.configSync = { ...settings.configSync, [key]: value };
+        }),
+      );
+    configToggle("main", "Main settings");
+    configToggle("appearance", "Appearance");
+    configToggle("themes", "Themes and CSS snippets");
+    configToggle("communityPluginList", "Enabled community plugins list");
+    configToggle("plugins", "Installed community plugins (code and settings)");
+    configToggle("hotkeys", "Hotkeys");
+
+    new Setting(containerEl).addButton((button) =>
+      button
+        .setButtonText("Save & connect")
+        .setCta()
+        .onClick(async () => {
+          await this.plugin.saveSettings();
+          await this.plugin.restart();
+          this.display();
+        }),
+    );
+  }
+}
