@@ -90,6 +90,10 @@ const closeObsidian = async () => {
   await waitFor(async () => !(await running()), 10_000);
 };
 
+const freezeObsidian = async (frozen: boolean) => {
+  await $`pkill ${frozen ? "-STOP" : "-CONT"} -f /Applications/Obsidian.app/`.quiet().nothrow();
+};
+
 const launchObsidian = async () => {
   await $`agent-desktop launch Obsidian --activate`.quiet().nothrow();
   await waitFor(async () => {
@@ -394,6 +398,21 @@ SCENARIOS.push({
   },
 });
 
+SCENARIOS.push({
+  name: "sleep: after Obsidian was frozen like a sleeping Mac, B's change reaches A on its own",
+  run: async () => {
+    // SIGSTOP freezes every Obsidian process the way sleep does: no timers, no socket reads.
+    await freezeObsidian(true);
+    try {
+      await sleep(70_000);
+      await write("b", "after-sleep.md", "written while asleep");
+    } finally {
+      await freezeObsidian(false);
+    }
+    return waitFor(async () => (await read("a", "after-sleep.md")) === "written while asleep", 60_000);
+  },
+});
+
 // Milestone-specific scenarios register here via E2E_EXTRA (module path exporting `scenarios`).
 if (process.env.E2E_EXTRA) {
   const extra = (await import(join(process.cwd(), process.env.E2E_EXTRA))) as {
@@ -422,6 +441,7 @@ try {
     }
   }
 } finally {
+  await freezeObsidian(false);
   await closeObsidian();
   await cp(BACKUP, CONFIG);
   await rm(BACKUP);

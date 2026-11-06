@@ -46,6 +46,8 @@ const DEFAULTS: Settings = {
 };
 
 const CONFIG_POLL_MS = 30_000;
+const UNLOCK_RETRY_MIN_MS = 5_000;
+const UNLOCK_RETRY_MAX_MS = 60_000;
 
 export default class CloudflareSyncPlugin extends Plugin {
   data: Data = { settings: { ...DEFAULTS } };
@@ -61,6 +63,9 @@ export default class CloudflareSyncPlugin extends Plugin {
   private reloadNotice: number | undefined;
   /** A long transfer in progress (announced with a notice when it starts and ends). */
   private bigTransfer = false;
+  /** Server unreachable while unlocking (e.g. opened before the network was up): retry. */
+  private unlockRetry: number | undefined;
+  private unlockBackoff = UNLOCK_RETRY_MIN_MS;
 
   get conf() {
     return this.data.settings;
@@ -143,6 +148,9 @@ export default class CloudflareSyncPlugin extends Plugin {
       this.registerEvent(this.app.vault.on("rename", (file, old) => this.client?.markDirty(file.path, old)));
       // The config dir has no vault events: poll it (stat-only unless something changed).
       this.registerInterval(window.setInterval(() => void this.pollConfig(), CONFIG_POLL_MS));
+      this.registerDomEvent(window, "online", () => {
+        if (this.unlockRetry !== undefined) void this.restart();
+      });
       void this.restart();
     });
   }
@@ -259,6 +267,8 @@ export default class CloudflareSyncPlugin extends Plugin {
   }
 
   async restart() {
+    window.clearTimeout(this.unlockRetry);
+    this.unlockRetry = undefined;
     this.client?.stop();
     this.client = undefined;
     const { serverUrl, vaultId, token, device } = this.conf;
@@ -286,8 +296,14 @@ export default class CloudflareSyncPlugin extends Plugin {
                 : "Enter the vault password in settings.";
       this.setState(error._tag === "RemoteError" ? "offline" : "locked", this.lockMessage);
       if (error._tag !== "RemoteError") new Notice(`Homebase: ${this.lockMessage}`);
+      else {
+        // Retry with backoff; coming back online retries right away.
+        this.unlockRetry = window.setTimeout(() => void this.restart(), this.unlockBackoff);
+        this.unlockBackoff = Math.min(this.unlockBackoff * 2, UNLOCK_RETRY_MAX_MS);
+      }
       return;
     }
+    this.unlockBackoff = UNLOCK_RETRY_MIN_MS;
     this.lockMessage = "";
     this.vaultKey = unlocked.success.master;
     if (unlocked.success.created) new Notice("Homebase: vault created and encrypted with your password.");

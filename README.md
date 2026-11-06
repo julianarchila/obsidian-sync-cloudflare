@@ -30,7 +30,7 @@ Homebase plugin ──HTTPS──▶ Worker ──▶ R2                encrypte
 
 - **Change log.** Each vault is a Durable Object holding one SQLite row per file version and a global cursor. Devices catch up with "changes since my cursor". Every write is a compare-and-swap on the file's version, so concurrent edits are detected rather than lost.
 - **Big first syncs stay usable.** Notes download before large attachments, and edits you make during a long download are uploaded between files instead of waiting for it to finish.
-- **Real time with no idle cost.** The plugin keeps a WebSocket open, and the server pushes a notice when something changes. Idle connections hibernate, and keep-alive pings are answered without waking the Durable Object. An open but idle Obsidian makes **zero billable requests**.
+- **Real time with no idle cost.** The plugin keeps a WebSocket open, and the server pushes a notice when something changes. Idle connections hibernate, and keep-alive pings are answered without waking the Durable Object. An open but idle Obsidian makes **zero billable requests**. After the computer wakes from sleep, the network comes back or the app returns to the foreground, the plugin checks the connection, reconnects if it died and catches up on its own.
 - **Encryption.** See [Security](#security).
 - **Conflicts.**
   - Edits to different parts of a Markdown note are merged with a three-way merge.
