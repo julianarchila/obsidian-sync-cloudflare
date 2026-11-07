@@ -111,7 +111,7 @@ This changes the data format, so it comes first. Existing test data is wiped.
 
 - Vault meta records `plain-v1`; the plugin creates and opens plain vaults and refuses any other format with a clear message.
 - Entries are keyed by their real path and metadata is JSON, validated against that path (an unsafe path is skipped, never written).
-- The owner's vault moved to a new vault id: the most complete device uploaded it, the others joined. The encryption code was then removed.
+- The owner's encrypted vault was deleted and created again as plain under the same id: the most complete device uploaded it, the others joined (vault ids tell devices to drop state saved for the old vault). The encryption code was then removed.
 - **Done when:** unit tests, smoke and the Obsidian end-to-end run pass on plain vaults, and the owner's devices sync the new vault.
 
 ### M8: Headless CLI (#4, draft)
