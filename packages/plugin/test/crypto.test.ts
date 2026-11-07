@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import * as Effect from "effect/Effect";
 
 import { decodeText, encodeText } from "../src/core/bytes.ts";
-import { createVault, deriveMasterKey, makeCryptoCodec, openVault, verifyMasterKey } from "../src/core/crypto-codec.ts";
+import { createVault, deriveMasterKey, makeCryptoCodec, openVault, verifyMasterKey } from "../src/core/legacy/crypto-codec.ts";
 import type { CodecShape } from "../src/core/services.ts";
 import { Device, Server } from "./harness.ts";
 
@@ -91,7 +91,8 @@ describe("engine with end-to-end encryption", () => {
     const intruder = await new Device("x", server, {}, other).start();
     a.write("n.md", "secret");
     await a.sync();
-    await expect(intruder.sync()).rejects.toBeDefined();
+    // Unreadable entries are skipped one by one instead of failing the whole sync.
+    expect((await intruder.sync()).skipped).toBe(1);
     expect(intruder.snapshot()).toEqual({});
   });
 });

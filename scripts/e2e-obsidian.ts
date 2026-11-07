@@ -135,7 +135,7 @@ const prepareVault = async (v: keyof typeof VAULTS) => {
   await writeFile(join(dir, ".obsidian/community-plugins.json"), JSON.stringify(["homebase"]));
   await writeFile(
     join(pluginDir, "data.json"),
-    JSON.stringify({ settings: { serverUrl, vaultId, token, device: `device-${v}`, password: "e2e-password", ...extraSettings } }),
+    JSON.stringify({ settings: { serverUrl, vaultId, token, device: `device-${v}`, ...extraSettings } }),
   );
 };
 
@@ -382,19 +382,103 @@ SCENARIOS.push({
   },
 });
 
+// ---- agents: MCP and the headless CLI share the vault with both Obsidian windows
+const mcp = async (name: string, args: Record<string, unknown>) => {
+  const response = await fetch(new URL(`/mcp/${vaultId}`, serverUrl), {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${token}`,
+      "content-type": "application/json",
+      accept: "application/json, text/event-stream",
+      "mcp-protocol-version": "2026-07-28",
+      "mcp-method": "tools/call",
+      "mcp-name": name,
+    },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/call",
+      params: {
+        name,
+        arguments: args,
+        _meta: {
+          "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+          "io.modelcontextprotocol/clientInfo": { name: "e2e-obsidian", version: "1" },
+          "io.modelcontextprotocol/clientCapabilities": {},
+        },
+      },
+    }),
+  });
+  const body = (await response.json()) as { result?: { content: Array<{ text?: string }>; isError?: boolean } };
+  return { text: body.result?.content.map((c) => c.text ?? "").join("\n") ?? "", isError: body.result?.isError === true };
+};
+
 SCENARIOS.push({
-  name: "E2EE: the server only stores opaque data",
+  name: "MCP: an agent's note reaches both Obsidian windows",
   run: async () => {
-    const headers = { authorization: `Bearer ${token}` };
-    const raw = await (await fetch(new URL(`/v1/vaults/${vaultId}/changes?since=0`, serverUrl), { headers })).text();
-    const entries = (JSON.parse(raw) as { entries: Array<{ chunks: string[] }> }).entries;
-    const blobs = await Promise.all(
-      entries.flatMap((e) => e.chunks).slice(0, 5).map(async (h) =>
-        new TextDecoder().decode(await (await fetch(new URL(`/v1/vaults/${vaultId}/blobs/${h}`, serverUrl), { headers })).arrayBuffer()),
-      ),
+    const created = await mcp("create_note", { path: "Agent/from-mcp.md", content: "written by an agent\n" });
+    const ok = await waitFor(
+      async () => (await read("a", "Agent/from-mcp.md")) === "written by an agent\n" && (await read("b", "Agent/from-mcp.md")) === "written by an agent\n",
+      30_000,
     );
-    const leaks = /hello|plan|offline|race/i.test(raw) || blobs.some((b) => /Hello|from A|plan/.test(b));
-    return [entries.length > 0 && !leaks, `${entries.length} entries checked`];
+    return [ok, created.text];
+  },
+});
+
+SCENARIOS.push({
+  name: "MCP: a stale agent edit merges with an edit typed in Obsidian",
+  run: async () => {
+    await write("a", "Agent/shared.md", "# Shared\n\nfirst paragraph\n\nlast paragraph\n");
+    await waitFor(async () => (await read("b", "Agent/shared.md")) !== undefined, 30_000);
+    const version = Number(/version (\d+)/.exec((await mcp("read_note", { path: "Agent/shared.md" })).text)?.[1]);
+    await write("b", "Agent/shared.md", "# Shared\n\nfirst paragraph, edited in Obsidian B\n\nlast paragraph\n");
+    await waitFor(async () => (await read("a", "Agent/shared.md"))?.includes("edited in Obsidian B") === true, 30_000);
+    const edit = await mcp("edit_note", { path: "Agent/shared.md", version, edits: [{ old_text: "last paragraph", new_text: "last paragraph, edited by the agent" }] });
+    const expected = "# Shared\n\nfirst paragraph, edited in Obsidian B\n\nlast paragraph, edited by the agent\n";
+    const ok = await waitFor(async () => (await read("a", "Agent/shared.md")) === expected && (await read("b", "Agent/shared.md")) === expected, 30_000);
+    return [ok && edit.text.includes("merged"), edit.text];
+  },
+});
+
+SCENARIOS.push({
+  name: "MCP: move_note updates links that Obsidian then shows",
+  run: async () => {
+    await write("a", "Agent/Target.md", "target\n");
+    await write("a", "Agent/Linker.md", "See [[Target]] and [[Agent/Target|alias]].\n");
+    await waitFor(async () => (await read("b", "Agent/Linker.md")) !== undefined, 30_000);
+    const moved = await mcp("move_note", { from: "Agent/Target.md", to: "Archive/Target renamed.md" });
+    const expected = "See [[Target renamed]] and [[Archive/Target renamed|alias]].\n";
+    const ok = await waitFor(
+      async () => (await read("b", "Agent/Linker.md")) === expected && (await read("b", "Archive/Target renamed.md")) === "target\n" && (await read("b", "Agent/Target.md")) === undefined,
+      30_000,
+    );
+    return [ok, moved.text];
+  },
+});
+
+SCENARIOS.push({
+  name: "CLI: a headless folder and both Obsidian windows stay in sync",
+  run: async () => {
+    const dir = join(tmpdir(), `homebase-e2e-cli-${Date.now()}`);
+    const cli = ["bun", "packages/cli/src/main.ts"];
+    await $`${cli} init ${dir} --url ${serverUrl} --vault ${vaultId} --device headless`.quiet();
+    const watcher = Bun.spawn([...cli, "watch", dir], { stdout: "ignore", stderr: "ignore" });
+    try {
+      const initial = await waitFor(async () => existsSync(join(dir, "Agent/from-mcp.md")), 30_000);
+      await mkdir(join(dir, "Headless"), { recursive: true });
+      await writeFile(join(dir, "Headless/from-cli.md"), "written in a plain folder\n");
+      const toObsidian = await waitFor(async () => (await read("a", "Headless/from-cli.md")) === "written in a plain folder\n", 30_000);
+      await write("b", "Headless/from-obsidian.md", "typed in Obsidian B\n");
+      const toCli = await waitFor(
+        async () => (await readFile(join(dir, "Headless/from-obsidian.md"), "utf8").catch(() => "")) === "typed in Obsidian B\n",
+        30_000,
+      );
+      return [initial && toObsidian && toCli, `initial=${initial} cli→obsidian=${toObsidian} obsidian→cli=${toCli}`];
+    } finally {
+      watcher.kill("SIGTERM");
+      await watcher.exited;
+      await rm(dir, { recursive: true, force: true });
+    }
   },
 });
 

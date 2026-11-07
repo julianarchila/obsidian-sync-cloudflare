@@ -90,9 +90,9 @@ export class HistoryModal extends Modal {
           .setButtonText(`Restore v${v.version}`)
           .setWarning()
           .onClick(async () => {
-            await this.run(restoreVersion(v));
-            this.onRestored(v.path);
-            new Notice(`Restored ${v.path} to v${v.version}`);
+            await this.run(restoreVersion(v, this.path));
+            this.onRestored(this.path);
+            new Notice(`Restored ${this.path} to v${v.version}${v.path !== this.path ? ` (from ${v.path})` : ""}`);
             this.close();
           }),
       );

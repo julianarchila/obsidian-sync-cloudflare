@@ -8,6 +8,7 @@ import * as Effect from "effect/Effect";
 import * as HttpServerRequest from "effect/http/HttpServerRequest";
 import * as HttpServerResponse from "effect/http/HttpServerResponse";
 
+import { SearchIndex } from "./search-index.ts";
 import { type Sql, VaultStore } from "./store.ts";
 import { handleVaultHttp } from "./vault-http.ts";
 
@@ -32,7 +33,9 @@ export const VaultObject = Cloudflare.DurableObject<Handlers>()(
   Effect.map(Cloudflare.DurableObjectState, (state) =>
     Effect.sync((): Handlers => {
       const native = state.raw;
-      const store = new VaultStore(doSql(native.storage));
+      const sql = doSql(native.storage);
+      const store = new VaultStore(sql);
+      const index = new SearchIndex(sql);
       // Keep-alive pings are answered by the runtime without waking this object (no billed duration).
       native.setWebSocketAutoResponse(new WebSocketRequestResponsePair("ping", "pong"));
 
@@ -61,7 +64,7 @@ export const VaultObject = Cloudflare.DurableObject<Handlers>()(
             return raw(new Response(null, { status: 101, webSocket: pair[0] }));
           }
 
-          const result = yield* Effect.promise(() => handleVaultHttp(store, request, route));
+          const result = yield* Effect.promise(() => handleVaultHttp(store, request, route, index));
           if (result.advancedTo !== undefined) broadcast(result.advancedTo);
           return raw(result.response);
         }),

@@ -177,6 +177,33 @@ export const makeEngine = (options: EngineOptions) =>
     const removeLocal = (path: string) =>
       vault.remove(path).pipe(Effect.tap(() => Effect.sync(() => options.onLocalWrite?.(path))));
 
+    /** Bytes for `hash` already on this device (an unchanged synced file), to avoid downloading them again. */
+    const localCopy = (hash: string, exclude: string) =>
+      Effect.gen(function* () {
+        for (const [path, base] of Object.entries(state.base)) {
+          if (path === exclude || base.hash !== hash) continue;
+          const local = yield* readLocal(path);
+          if (local !== null && local.hash === hash) return local.bytes;
+        }
+        return null;
+      });
+
+    const fetchContent = (entry: Entry, meta: FileMeta, path: string) =>
+      localCopy(meta.hash, path).pipe(
+        Effect.flatMap((bytes) => (bytes !== null ? Effect.succeed(bytes) : download(entry.chunks))),
+      );
+
+    /** A not-yet-pushed local file holding `base`'s content: where `path` was moved while offline. */
+    const findLocalMove = (base: BaseEntry) =>
+      Effect.gen(function* () {
+        for (const file of yield* vault.list) {
+          if (state.base[file.path] !== undefined || file.size !== base.size || !options.isSyncable(file.path)) continue;
+          const local = yield* readLocal(file.path);
+          if (local !== null && local.hash === base.hash) return file.path;
+        }
+        return null;
+      });
+
     /** Remote version wins the path; ours survives as a conflict copy (or both merge). */
     const resolveConflict = (path: string, base: BaseEntry | undefined, ours: Uint8Array, entry: Entry, meta: FileMeta) =>
       Effect.gen(function* () {
@@ -229,8 +256,21 @@ export const makeEngine = (options: EngineOptions) =>
 
         if (local !== null && local.hash === meta.hash) return setBase(path, entry, meta, local.stat);
 
+        // Moved here while offline, edited elsewhere: put the edit at the new path (the push
+        // then records the move) instead of recreating the old path next to it.
+        if (local === null && base !== undefined) {
+          const movedTo = yield* findLocalMove(base);
+          if (movedTo !== null) {
+            yield* writeLocal(movedTo, yield* download(entry.chunks));
+            state.base[path] = { pathId: entry.path, version: entry.version, hash: meta.hash, size: meta.size, mtime: meta.mtime, chunks: entry.chunks };
+            report.pulled++;
+            activity("downloaded", movedTo, `edited elsewhere; moved here from ${path}`);
+            return;
+          }
+        }
+
         if (local === null || localUnchanged) {
-          const stat = yield* writeLocal(path, yield* download(entry.chunks));
+          const stat = yield* writeLocal(path, yield* fetchContent(entry, meta, path));
           setBase(path, entry, meta, stat);
           report.pulled++;
           activity("downloaded", path);
@@ -253,14 +293,26 @@ export const makeEngine = (options: EngineOptions) =>
           const page = yield* remote.changes(state.cursor);
           const work: Array<{ entry: Entry; meta: FileMeta; size: number; small: boolean }> = [];
           for (const entry of page.entries) {
-            const meta = yield* codec.openMeta(entry.path, entry.meta);
-            if (!options.isSyncable(meta.path)) continue;
+            // Unreadable or unsafe metadata (e.g. a path escaping the vault): skip that entry only.
+            const meta = yield* codec.openMeta(entry.path, entry.meta).pipe(
+              Effect.catchTag("CodecError", (error) =>
+                Effect.sync(() => {
+                  report.skipped++;
+                  log(`skipped ${entry.path}: ${error.message}`);
+                  activity("skipped", entry.path, error.message);
+                  return null;
+                }),
+              ),
+            );
+            if (meta === null || !options.isSyncable(meta.path)) continue;
             const base = state.base[meta.path];
             if (base && base.pathId === entry.path && base.version >= entry.version) continue;
             const size = entry.deleted ? 0 : meta.size;
             work.push({ entry, meta, size, small: size < LARGE_BYTES || NOTE_EXT.test(meta.path) });
           }
           work.sort((a, b) => Number(b.small) - Number(a.small) || a.size - b.size);
+          // Rename tombstones go last: the new path reuses the old file's bytes before it is removed.
+          work.sort((a, b) => Number(a.entry.movedTo !== undefined) - Number(b.entry.movedTo !== undefined));
 
           const total = work.length;
           const bytesTotal = work.reduce((n, w) => n + w.size, 0);
@@ -407,6 +459,9 @@ export const makeEngine = (options: EngineOptions) =>
               if (result.ok) {
                 delete state.base[item.from];
                 setBase(item.change.path, result.entries[1]!, metaFor(item.change), item.change.stat);
+                // Edited during the move: the server has the old content at the new path. Push the edit next.
+                if (item.change.hash !== item.base.hash)
+                  state.base[item.change.path] = { ...state.base[item.change.path]!, hash: item.base.hash, size: -1 };
                 report.pushed++;
                 activity("renamed", item.change.path, item.from);
                 continue;
@@ -439,6 +494,20 @@ export const makeEngine = (options: EngineOptions) =>
           changed = changed.filter((c) => c !== change);
         }
 
+        // Moved and edited in one go (e.g. links rewritten while moving): same file name in
+        // another folder, and only one candidate on each side.
+        for (const from of [...missing]) {
+          const base = state.base[from]!;
+          const name = from.slice(from.lastIndexOf("/") + 1);
+          const matches = changed.filter((c) => c.base === undefined && c.path.slice(c.path.lastIndexOf("/") + 1) === name);
+          const sameName = missing.filter((p) => p.slice(p.lastIndexOf("/") + 1) === name);
+          if (matches.length !== 1 || sameName.length !== 1) continue;
+          const change = matches[0]!;
+          renames.push({ from, change, base });
+          missing = missing.filter((p) => p !== from);
+          changed = changed.filter((c) => c !== change);
+        }
+
         const pending: Pending[] = [];
         for (const { from, change, base } of renames) {
           const to = yield* codec.pathId(change.path);
@@ -447,7 +516,8 @@ export const makeEngine = (options: EngineOptions) =>
             from: base.pathId,
             to,
             baseVersion: base.version,
-            meta: yield* codec.sealMeta(to, metaFor(change)),
+            // The server moves the stored content; an edit made with the move is pushed right after.
+            meta: yield* codec.sealMeta(to, { ...metaFor(change), hash: base.hash, size: base.size }),
             device: options.device,
           };
           pending.push({ kind: "rename", from, change: { ...change, base: { ...base, pathId: to } }, base, op });

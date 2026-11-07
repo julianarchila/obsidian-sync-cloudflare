@@ -26,6 +26,7 @@ interface Row {
   meta: string;
   device: string;
   created_at: number;
+  moved_to: string | null;
 }
 
 const toEntry = (row: Row): Entry => ({
@@ -37,9 +38,10 @@ const toEntry = (row: Row): Entry => ({
   meta: row.meta,
   device: row.device,
   createdAt: row.created_at,
+  ...(row.moved_to ? { movedTo: row.moved_to } : {}),
 });
 
-const SELECT = "SELECT v.seq, v.path, v.version, v.deleted, v.chunks, v.meta, v.device, v.created_at FROM versions v";
+const SELECT = "SELECT v.seq, v.path, v.version, v.deleted, v.chunks, v.meta, v.device, v.created_at, v.moved_to FROM versions v";
 
 export class VaultStore {
   constructor(
@@ -56,6 +58,9 @@ export class VaultStore {
       device TEXT NOT NULL,
       created_at INTEGER NOT NULL
     )`);
+    // Added after the first release: tombstones left by renames point to the new path.
+    if (!sql.all<{ name: string }>("PRAGMA table_info(versions)").some((c) => c.name === "moved_to"))
+      sql.run("ALTER TABLE versions ADD COLUMN moved_to TEXT");
     sql.run("CREATE UNIQUE INDEX IF NOT EXISTS versions_path_version ON versions(path, version)");
     sql.run("CREATE TABLE IF NOT EXISTS head (path TEXT PRIMARY KEY, seq INTEGER NOT NULL)");
     sql.run("CREATE INDEX IF NOT EXISTS head_seq ON head(seq)");
@@ -90,9 +95,21 @@ export class VaultStore {
     return this.sql.all<Row>(`${SELECT} WHERE v.path = ? ORDER BY v.version DESC`, path).map(toEntry);
   }
 
+  /** Paths this one was renamed from (most recent first). */
+  movedFrom(path: string): string[] {
+    return this.sql
+      .all<{ path: string }>("SELECT path FROM versions WHERE moved_to = ? ORDER BY seq DESC", path)
+      .map((r) => r.path);
+  }
+
+  /** Newest versions first (every version, not just heads), optionally only after `since`. */
+  recent(limit: number, since = 0): Entry[] {
+    return this.sql.all<Row>(`${SELECT} WHERE v.seq > ? ORDER BY v.seq DESC LIMIT ?`, since, limit).map(toEntry);
+  }
+
   deleted(): Entry[] {
     return this.sql
-      .all<Row>(`${SELECT} JOIN head h ON h.seq = v.seq WHERE v.deleted = 1 ORDER BY v.seq DESC LIMIT 1000`)
+      .all<Row>(`${SELECT} JOIN head h ON h.seq = v.seq WHERE v.deleted = 1 AND v.moved_to IS NULL ORDER BY v.seq DESC LIMIT 1000`)
       .map(toEntry);
   }
 
@@ -128,11 +145,11 @@ export class VaultStore {
   private append(
     path: string,
     previous: Entry | null,
-    fields: { deleted: boolean; chunks: ReadonlyArray<string>; meta: string; device: string },
+    fields: { deleted: boolean; chunks: ReadonlyArray<string>; meta: string; device: string; movedTo?: string },
   ): Entry {
     const version = (previous?.version ?? 0) + 1;
     this.sql.run(
-      "INSERT INTO versions (path, version, deleted, chunks, meta, device, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      "INSERT INTO versions (path, version, deleted, chunks, meta, device, created_at, moved_to) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
       path,
       version,
       fields.deleted ? 1 : 0,
@@ -140,6 +157,7 @@ export class VaultStore {
       fields.meta,
       fields.device,
       this.now(),
+      fields.movedTo ?? null,
     );
     const seq = this.seq();
     this.sql.run(
@@ -176,7 +194,13 @@ export class VaultStore {
           return { ok: false, path: op.from, current: source };
         const target = this.current(op.to);
         if (this.liveVersion(target) !== null) return { ok: false, path: op.to, current: target };
-        const removed = this.append(op.from, source, { deleted: true, chunks: [], meta: source.meta, device: op.device });
+        const removed = this.append(op.from, source, {
+          deleted: true,
+          chunks: [],
+          meta: source.meta,
+          device: op.device,
+          movedTo: op.to,
+        });
         const added = this.append(op.to, target, { deleted: false, chunks: source.chunks, meta: op.meta, device: op.device });
         return { ok: true, entries: [removed, added] };
       }
