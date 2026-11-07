@@ -61,8 +61,13 @@ export default class CloudflareSyncPlugin extends Plugin {
   }
 
   override async onload() {
-    const stored = (await this.loadData()) as Partial<Data> | null;
-    const settings: Partial<Settings> = stored?.settings ?? {};
+    const stored = (await this.loadData()) as (Partial<Data> & { key?: unknown }) | null;
+    // Settings from the end-to-end encrypted versions: drop the stored vault key and its options.
+    const { rememberKey: _rememberKey, password: _password, ...settings } = (stored?.settings ?? {}) as Partial<Settings> & {
+      rememberKey?: unknown;
+      password?: unknown;
+    };
+    const legacy = stored?.key !== undefined || _rememberKey !== undefined || _password !== undefined;
     this.data = {
       settings: {
         ...DEFAULTS,
@@ -75,6 +80,7 @@ export default class CloudflareSyncPlugin extends Plugin {
       },
       selectiveFingerprint: stored?.selectiveFingerprint,
     };
+    if (legacy) await this.saveData(this.data);
 
     // Status: ribbon icon (also on mobile, where plugin status bar items are hidden) + desktop status bar.
     this.statusBar = this.addStatusBarItem();
