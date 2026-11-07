@@ -18,6 +18,7 @@ import * as Schema from "effect/Schema";
 
 import { isAuthorized, safeEqual } from "./auth.ts";
 import { makeMcpHandler, type McpClient, parseMcpClients } from "./mcp.ts";
+import { authenticateHeader, handleOAuth, verifyAccessToken } from "./oauth.ts";
 import { makeVaultOps, VaultNotFound, VaultOpsError } from "./vault-ops.ts";
 import { VaultObject } from "./vault-object.ts";
 
@@ -101,11 +102,13 @@ export default class SyncWorker extends Cloudflare.Worker<SyncWorker>()(
 
     /** Which MCP client a request comes from: the owner token, or one of OSCF_MCP_CLIENTS. */
     /** MCP tokens come only from the Authorization header (never the URL, which ends up in logs). */
-    const mcpClient = (request: Request, vault: string): McpClient | null => {
+    const mcpClient = async (request: Request, vault: string): Promise<McpClient | null> => {
       const header = request.headers.get("authorization");
       if (!header?.startsWith("Bearer ")) return null;
       const presented = header.slice("Bearer ".length);
       if (safeEqual(presented, Redacted.value(token))) return { name: "owner", access: "write", folders: [] };
+      // Connectors added through OAuth (Claude, ChatGPT, ...).
+      if (presented.startsWith("hb1.")) return verifyAccessToken(Redacted.value(token), presented, vault);
       const client = mcpClients.find((c) => safeEqual(presented, c.token));
       const vaultAllowed = (pattern: string) => (pattern.endsWith("*") ? vault.startsWith(pattern.slice(0, -1)) : pattern === vault);
       return client && client.vaults.some(vaultAllowed) ? client : null;
@@ -113,11 +116,11 @@ export default class SyncWorker extends Cloudflare.Worker<SyncWorker>()(
 
     const mcpRequest = (request: Request, vault: string) =>
       Effect.gen(function* () {
-        const client = mcpClient(request, vault);
+        const client = yield* Effect.promise(() => mcpClient(request, vault));
         if (client === null)
           return HttpServerResponse.text("Unauthorized", {
             status: 401,
-            headers: { "www-authenticate": 'Bearer realm="homebase"' },
+            headers: { "www-authenticate": authenticateHeader(new URL(request.url).origin, vault) },
           });
         // Bindings (R2, Durable Objects) need the Worker's runtime context.
         const services = yield* Effect.context<never>();
@@ -213,6 +216,9 @@ export default class SyncWorker extends Cloudflare.Worker<SyncWorker>()(
         const { pathname, searchParams } = new URL(request.url);
 
         if (pathname === "/health") return HttpServerResponse.text("ok");
+
+        const oauth = yield* Effect.promise(() => handleOAuth(request, Redacted.value(token)));
+        if (oauth) return HttpServerResponse.raw(oauth, { status: oauth.status });
 
         const mcpMatch = MCP_ROUTE.exec(pathname);
         if (mcpMatch) {

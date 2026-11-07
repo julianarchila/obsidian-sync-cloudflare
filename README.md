@@ -2,14 +2,17 @@
 
 # Homebase
 
-**A self-hosted replacement for Obsidian Sync, end-to-end encrypted, running on your own Cloudflare account.**
+**A self-hosted replacement for Obsidian Sync on your own Cloudflare account, with your AI agents built in.**
 
-You deploy one Worker with one command and install the **Homebase** plugin on your devices. Your vault then syncs in real time. Your notes are encrypted on your devices before they leave them, and the server only ever stores ciphertext.
+You deploy one Worker with one command and install the **Homebase** plugin on your devices. Your vault then syncs in real time. The same notes are open to your agents: connect Claude or ChatGPT with just a URL (MCP), or keep a synced folder on an always-on machine for shell agents such as Claude Code (`homebase` CLI). Agent edits merge with yours, are recorded under the agent's name, and can be undone.
+
+Free and open source. Personal software: each person runs their own instance.
 
 | | Obsidian Sync | Homebase |
 |---|---|---|
 | Real-time sync across devices | ✅ | ✅ |
-| End-to-end encryption | ✅ | ✅ Always on |
+| Encryption | ✅ End to end | In transit and at rest (Cloudflare); not end to end, so agents can read notes. See [Security](#security) |
+| AI agents (Claude, ChatGPT, Claude Code, scripts) | ❌ | ✅ MCP endpoint with OAuth, and a headless CLI |
 | Version history and deleted-file recovery | 1 to 12 months | ✅ Configurable, 365 days by default |
 | Conflict handling | Merge for Markdown | ✅ 3-way merge for Markdown, key merge for JSON settings |
 | Selective sync (folders, file types) | ✅ | ✅ |
@@ -22,16 +25,18 @@ You deploy one Worker with one command and install the **Homebase** plugin on yo
 ## How it works
 
 ```
-Homebase plugin ──HTTPS──▶ Worker ──▶ R2                encrypted chunks (≤8 MB), content-addressed
+Homebase plugin ─┐
+homebase CLI ────┼─HTTPS─▶ Worker ──▶ R2                 file chunks (≤8 MB), content-addressed
+Claude, ChatGPT ─┘  (MCP)    │
        ▲                     │
        └──── WebSocket ──────┴──▶ Durable Object         change log: one SQLite row per file version
-                                  (one per vault)         + `seq` cursor, live "something changed" pushes
+                                  (one per vault)         + `seq` cursor, live pushes, search index
 ```
 
 - **Change log.** Each vault is a Durable Object holding one SQLite row per file version and a global cursor. Devices catch up with "changes since my cursor". Every write is a compare-and-swap on the file's version, so concurrent edits are detected rather than lost.
 - **Big first syncs stay usable.** Notes download before large attachments, and edits you make during a long download are uploaded between files instead of waiting for it to finish.
 - **Real time with no idle cost.** The plugin keeps a WebSocket open, and the server pushes a notice when something changes. Idle connections hibernate, and keep-alive pings are answered without waking the Durable Object. An open but idle Obsidian makes **zero billable requests**. After the computer wakes from sleep, the network comes back or the app returns to the foreground, the plugin checks the connection, reconnects if it died and catches up on its own.
-- **Encryption.** See [Security](#security).
+- **Agents are devices too.** MCP edits and CLI edits go through the same change log, so they merge with yours, show up in history under the agent's name (`mcp:claude`, `cli-vm`) and can be undone.
 - **Conflicts.**
   - Edits to different parts of a Markdown note are merged with a three-way merge.
   - Overlapping edits keep both versions: yours is saved as `note (conflict <device> <date>).md`.
@@ -41,14 +46,11 @@ Homebase plugin ──HTTPS──▶ Worker ──▶ R2                encrypte
 
 ## Security
 
-- **Vault key.** Each vault has a random 256-bit key, wrapped with your **vault password** (PBKDF2-SHA256, 600,000 iterations). The password never leaves your device. The server stores only the wrapped key and a check value that lets a device reject a wrong password before syncing anything.
-- **What gets encrypted, and how.** All keys are derived from the vault key with HKDF.
-  - Paths become HMAC-SHA256 ids.
-  - Metadata (real path, size, mtime, hash) is sealed with AES-256-GCM and bound to its path id.
-  - File chunks are sealed with AES-256-GCM and padded to 4 KiB, so sizes leak little.
-  - Identical chunks produce identical ciphertext within a vault, which enables dedup. Like Obsidian Sync, this reveals whether two chunks of your vault are equal, and nothing else.
-- **The deploy token** (`OSCF_TOKEN`) authenticates devices to your Worker. Without your password it gives no access to note contents.
-- **Changing the password** only re-wraps the vault key, so nothing is re-encrypted and other devices keep syncing. **If you lose the password, the data cannot be recovered.**
+Homebase stores your notes **unencrypted** in your own Cloudflare account, so your agents and the search index can read them. Earlier versions (up to 0.2) were end-to-end encrypted; see [Migrating from an encrypted vault](docs/MIGRATION.md).
+
+- **In transit and at rest:** HTTPS everywhere; Cloudflare encrypts R2 and Durable Object storage at rest. Cloudflare, as your infrastructure provider, could technically read your data, as with iCloud or Google Drive.
+- **The deploy token** (`OSCF_TOKEN`) gives full access to your vaults. Keep it secret, and use 2FA on your Cloudflare account. If it leaks, set a new one and redeploy: that also revokes every connected agent.
+- **Agents get scoped access.** Each connection (OAuth, or a static token in `OSCF_MCP_CLIENTS`) is limited to the vaults you chose, read-only or read-write, and optionally to some folders. Settings folders (`.obsidian`) and hidden files are never exposed. Every change records which connection made it, and nothing is lost: deletions and overwrites stay in history.
 
 ## Cost
 
@@ -90,13 +92,10 @@ Deployment is managed by [Alchemy](https://alchemy.run), and its state lives in 
    - **Server URL:** your `OSCF_URL`.
    - **Token:** your `OSCF_TOKEN`.
    - **Vault id:** any short name, such as `personal`.
-   - **Device name:** used in conflict file names.
-   - **Vault password:** creates the vault's encryption.
+   - **Device name:** used in conflict file names and history.
 
    Then press *Save & connect*. The status bar shows `☁ synced` once the upload finishes.
-3. **On every other device,** use the same server URL, token, vault id and vault password. Start from an empty vault, and Homebase downloads everything.
-
-Each device can choose to remember the derived key, which never includes the password. *Lock vault* forgets it.
+3. **On every other device,** use the same server URL, token and vault id. Start from an empty vault, and Homebase downloads everything.
 
 ## Using it
 
@@ -104,24 +103,44 @@ Each device can choose to remember the derived key, which never includes the pas
 - **Version history:** right-click a file, then *Version history*, or use the command palette. It shows every version, a diff against the current one, and *Restore*.
 - **Recover deleted files:** command *Recover deleted files*.
 - **Selective sync and settings sync:** *Settings → Homebase*. Changes from other devices to settings apply after reloading Obsidian.
-- **Change vault password:** *Settings → Homebase*.
 - **URIs:** `obsidian://homebase?vault=<name>&do=history&file=<path>`, `do=deleted`, `do=sync`, `do=status`.
-- **Verify your backup:** `bun scripts/verify-restore.ts <vault-id> <local-vault-folder> <password-file>` downloads and decrypts the whole vault as a new device would, then compares it byte for byte with your local copy. Instead of a password file you can pass the device's `.obsidian/plugins/homebase/data.json`, which holds the remembered key.
+- **Verify your backup:** `bun scripts/verify-restore.ts <vault-id> <local-vault-folder>` downloads the whole vault as a new device would, then compares it byte for byte with your local copy.
+
+## Connect your AI agents
+
+### Claude, ChatGPT and other MCP clients
+
+Add a custom connector with the URL `https://<your-worker>/mcp/<vault-id>`. The connector opens a Homebase page where you approve it: enter your deploy token, and choose read-only or read-write access and, optionally, the folders it may see. The connection name you pick is how its changes appear in history.
+
+- **Claude:** *Settings → Connectors → Add custom connector*. Works on the web, desktop and mobile apps.
+- **ChatGPT:** in developer mode, add a custom connector (app) with the same URL.
+- **Claude Code:** `claude mcp add --transport http homebase https://<your-worker>/mcp/<vault-id>`, then `/mcp` to sign in.
+
+The agent gets tools to list, read, search and find backlinks; to create, edit, append, move (links are updated) and delete notes; and to see history, compare versions, undo one change or restore a version. Edits carry the version the agent read: if you changed the note meanwhile, both edits are merged, and if they overlap the agent is told what changed instead of overwriting it.
+
+**Static tokens** (scripts, clients without OAuth): set `OSCF_MCP_CLIENTS` to a JSON array before deploying, for example `[{"name":"scripts","token":"<openssl rand -hex 32>","access":"read","folders":["Work"],"vaults":["personal"]}]`, and send `Authorization: Bearer <token>`. `vaults` is required; `prefix-*` matches by prefix.
+
+### A synced folder for shell agents
+
+Run `homebase watch` on an always-on machine (a VM or home server) to keep a plain folder in sync. Agents such as Claude Code or Codex then work on it with ordinary tools (`rg`, `sed`, Python), and their edits reach your devices within a couple of seconds. See [`packages/cli/README.md`](packages/cli/README.md) for setup, `homebase mv` (moves with link rewriting), `.homebaseignore` and a systemd unit.
 
 ## Limitations
 
 - **Tested on desktop (macOS) and Android** (emulator, Obsidian 1.15). iOS should work through the same APIs, but it is untested. On mobile, Obsidian only syncs while the app is open.
-- **One deploy token per deployment.** There are no per-user accounts or shared vaults.
+- **One owner per deployment.** There are no per-user accounts or shared vaults. Devices share the deploy token. OAuth connections can only be revoked all at once (by rotating the token).
 - **No interoperability with Obsidian Sync.** Pick one.
 - **File names:** Android and Windows don't allow `\ / : * ? < > " |` in file names, but macOS does. Files whose names a device can't store are skipped on that device, and listed in the status panel and activity log, while everything else keeps syncing. Rename them (for example on the Mac) to sync them there. The Obsidian Web Clipper's `safe_name` filter avoids such names.
-- **Never synced:** plugin caches (`plugins/*/cache`), workspace layouts, and Homebase's own settings, which hold the token and key.
+- **Never synced:** plugin caches (`plugins/*/cache`), workspace layouts, and Homebase's own settings, which hold the token.
 
 ## Development
 
 ```sh
-bun run check        # typecheck + unit tests (server store, sync engine, crypto, merge) + bundle guard
+bun run check        # typecheck + unit tests (server store, sync engine, merge, links) + bundle guard
 bun run dev          # Worker + Durable Object + R2 emulated locally on http://localhost:1337
-bun run smoke:dev    # two in-memory devices against the dev server
+bun run smoke:dev    # two in-memory devices and the MCP endpoint against the dev server
+bun scripts/mcp-e2e.ts    # MCP tools, scopes and merges against the dev server
+bun scripts/oauth-e2e.ts  # the connector OAuth flow against the dev server
+bun scripts/cli-e2e.ts    # the headless CLI, including watch
 bun run plugin:dev   # watch build; OBSIDIAN_VAULT=/path/to/test-vault writes straight into a vault
 bun run e2e          # drives the real Obsidian app (macOS, needs agent-desktop) against OSCF_URL
 bun run release      # builds the plugin and publishes a GitHub release
@@ -131,9 +150,11 @@ bun run release      # builds the plugin and publishes a GitHub release
 |---|---|
 | `alchemy.run.ts` | All infrastructure: Worker, Durable Object, R2 bucket, retention cron |
 | `packages/protocol` | Wire contract (Effect Schema) |
-| `packages/server` | Change-log store, Durable Object, Worker (auth, routing, blobs, retention) |
-| `packages/plugin` | `src/core`: the sync engine (Effect, headless-testable). `src/obsidian`: Obsidian adapters and UI |
+| `packages/server` | Change-log store, Durable Object, Worker (auth, routing, blobs, retention), MCP endpoint, OAuth |
+| `packages/plugin` | `src/core`: the sync engine (Effect, headless-testable), shared with the CLI. `src/obsidian`: Obsidian adapters and UI |
+| `packages/cli` | `homebase`, headless sync for always-on machines and shell agents |
 | `docs/SCOPE.md` | Design decisions and milestones |
+| `docs/MIGRATION.md` | Moving from an end-to-end encrypted vault (versions up to 0.2) |
 | `AGENTS.md` | Notes for coding agents working on (or deploying) this repo |
 
 ## License

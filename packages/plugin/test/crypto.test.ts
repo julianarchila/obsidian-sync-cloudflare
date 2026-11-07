@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import * as Effect from "effect/Effect";
 
 import { decodeText, encodeText } from "../src/core/bytes.ts";
-import { createVault, deriveMasterKey, makeCryptoCodec, openVault, verifyMasterKey } from "../src/core/crypto-codec.ts";
+import { createVault, deriveMasterKey, makeCryptoCodec, openVault, verifyMasterKey } from "../src/core/legacy/crypto-codec.ts";
 import type { CodecShape } from "../src/core/services.ts";
 import { Device, Server } from "./harness.ts";
 

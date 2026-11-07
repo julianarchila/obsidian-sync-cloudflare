@@ -27,7 +27,7 @@ import { encode, type FileInfo, isTextPath, type VaultOps } from "./vault-ops.ts
 
 export interface McpClient {
   readonly name: string;
-  /** `read` hides every write tool. */
+  /** `read` hides every write tool (and refuses calls to them). */
   readonly access: "read" | "write";
   /** Folder prefixes this client may see and touch; empty means the whole vault. */
   readonly folders: ReadonlyArray<string>;
@@ -845,7 +845,21 @@ const INSTRUCTIONS = `This server is the user's personal notes vault (Obsidian, 
 - move_note keeps history and updates links; find_backlinks lists notes linking to a note.
 - recent_changes shows what changed and who changed it.`;
 
-const registrations = Layer.effectDiscard(Effect.forEach(tools, register, { discard: true }));
+const WRITE_TOOLS = new Set(tools.filter((t) => t.write).map((t) => t.name));
+
+/** Read-only connections don't see write tools at all (calls are refused in `register` too). */
+const ReadOnlyGate = McpServer.visibility(
+  ({ target }) =>
+    (Effect.service(McpAccess) as unknown as Effect.Effect<McpAccessShape>).pipe(
+      Effect.map((access) => access.client.access === "write" || !WRITE_TOOLS.has(target)),
+    ),
+  { global: true },
+);
+
+const registrations = Layer.mergeAll(
+  Layer.effectDiscard(Effect.forEach(tools, register, { discard: true })),
+  ReadOnlyGate,
+);
 
 /** Build the MCP web handler once per Worker isolate. */
 export const makeMcpHandler = () => {

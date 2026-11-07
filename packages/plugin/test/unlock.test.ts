@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import * as Effect from "effect/Effect";
 
-import { makeCryptoCodec } from "../src/core/crypto-codec.ts";
-import { changeVaultPassword, unlockVault } from "../src/core/unlock.ts";
+import { makeCryptoCodec } from "../src/core/legacy/crypto-codec.ts";
+import { changeVaultPassword, unlockVault } from "../src/core/legacy/unlock.ts";
 import { Device, Server } from "./harness.ts";
 
 const unlock = (server: Server, input: Parameters<typeof unlockVault>[1]) =>

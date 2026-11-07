@@ -10,7 +10,7 @@ import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
 
 import { createVault, openVault, parseVaultRecord, verifyMasterKey, wrapVaultKey } from "./crypto-codec.ts";
-import type { RemoteError, RemoteShape } from "./services.ts";
+import type { RemoteError, RemoteShape } from "../services.ts";
 
 export class UnlockError extends Data.TaggedError("UnlockError")<{
   readonly reason: "NeedPassword" | "WrongPassword" | "BadRecord";

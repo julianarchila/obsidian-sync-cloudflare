@@ -1,4 +1,9 @@
 /**
+ * LEGACY: Homebase no longer encrypts vaults. This codec only remains so the
+ * restore drill (scripts/verify-restore.ts) can read vaults created by the
+ * older, end-to-end encrypted versions before they are migrated
+ * (docs/MIGRATION.md). The plugin and CLI never import it.
+ *
  * End-to-end encryption (M1). The server only ever sees:
  *   - path ids:  HMAC-SHA256(K_path, path)              (stable, opaque)
  *   - metadata:  AES-256-GCM(K_meta, json, aad=pathId)  (random nonce; bound to its path)
@@ -21,8 +26,8 @@ import * as Base64 from "effect/encoding/Base64";
 import * as Layer from "effect/Layer";
 import * as Result from "effect/Result";
 
-import { concat, decodeText, encodeText, toHex } from "./bytes.ts";
-import { CodecError, type CodecShape, type FileMeta } from "./services.ts";
+import { concat, decodeText, encodeText, toHex } from "../bytes.ts";
+import { CodecError, type CodecShape, type FileMeta } from "../services.ts";
 
 export const PBKDF2_ITERATIONS = 600_000;
 const PAD_TO = 4096;

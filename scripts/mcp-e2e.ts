@@ -56,6 +56,32 @@ const call = async (name: string, args: Record<string, unknown> = {}, bearer = t
   const content = body.result?.content ?? [];
   return { status: 200, text: content.filter((c) => c.type === "text").map((c) => c.text).join("\n"), isError: body.result?.isError === true, content };
 };
+const listTools = async (bearer: string) => {
+  const response = await fetch(`${serverUrl}/mcp/${vaultId}`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${bearer}`,
+      "content-type": "application/json",
+      accept: "application/json, text/event-stream",
+      "mcp-protocol-version": "2026-07-28",
+      "mcp-method": "tools/list",
+    },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: ++id,
+      method: "tools/list",
+      params: {
+        _meta: {
+          "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+          "io.modelcontextprotocol/clientInfo": { name: "mcp-e2e", version: "1" },
+          "io.modelcontextprotocol/clientCapabilities": {},
+        },
+      },
+    }),
+  });
+  const body = (await response.json()) as { result?: { tools: Array<{ name: string }> } };
+  return (body.result?.tools ?? []).map((t) => t.name);
+};
 const versionOf = (text: string) => Number(/version (\d+)/.exec(text)?.[1]);
 
 const remote = makeHttpRemote({ serverUrl, vaultId, token, http: fetchHttp() });
@@ -147,9 +173,16 @@ check("read_attachment returns an image block", image.content.some((c) => c.type
 
 // ---- scoped clients
 if (readerToken && workToken) {
+  const readerTools = await listTools(readerToken);
+  const ownerTools = await listTools(token);
+  check(
+    "read-only client doesn't see write tools",
+    readerTools.includes("read_note") && !readerTools.includes("edit_note") && ownerTools.includes("edit_note"),
+    `reader: ${readerTools.join(",")}`,
+  );
   check("read-only client can read", !(await call("read_note", { path: "Projects/Plan.md" }, readerToken)).isError);
   const denied = await call("create_note", { path: "x.md", content: "x" }, readerToken);
-  check("read-only client cannot write", denied.isError && denied.text.includes("read-only"), denied.text);
+  check("read-only client cannot write", denied.isError, denied.text);
   const scopedList = await call("list_notes", {}, workToken);
   check("folder-scoped client only sees its folder", scopedList.text.includes("Work/Todo.md") && !scopedList.text.includes("Projects/"), scopedList.text);
   const outside = await call("read_note", { path: "Projects/Plan.md" }, workToken);
