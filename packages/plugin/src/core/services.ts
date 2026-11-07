@@ -86,6 +86,8 @@ export interface BaseEntry {
 export interface SyncState {
   cursor: number;
   base: Record<string, BaseEntry>;
+  /** Id of the vault this state belongs to (see plain-vault.ts); a vault deleted and created again has a new one. */
+  vault?: string;
 }
 
 export interface LocalStateShape {

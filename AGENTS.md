@@ -32,6 +32,7 @@
   - A native alert can block a graceful quit; the script dismisses it and escalates to SIGTERM.
   - Run `focus-window` before taking screenshots.
 - `scripts/verify-restore.ts` is a read-only restore drill. It downloads a whole vault and compares it byte for byte with a local folder.
+- `scripts/delete-vault.ts <id> --yes` deletes a vault on the server (owner token). Use it only on test vaults unless the user asks.
 
 ## Architecture
 

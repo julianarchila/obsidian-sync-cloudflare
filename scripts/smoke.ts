@@ -143,6 +143,30 @@ const c = await new Device("smoke-c", remote(), { merge: mergeText }).start();
 await c.sync();
 check("a fresh device still gets every current file after pruning", JSON.stringify(c.snapshot()) === JSON.stringify(a.snapshot()));
 
+// Deleting a vault removes its log and blobs; the id then names a new, empty vault.
+const destroyUrl = new URL(`/v1/vaults/${vaultId}/destroy?confirm=${vaultId}`, serverUrl);
+const unconfirmed = await fetch(new URL(`/v1/vaults/${vaultId}/destroy`, serverUrl), { method: "POST", headers: { authorization: `Bearer ${token}` } });
+check("deleting a vault needs the id confirmed", unconfirmed.status === 400);
+const destroyed = (await (await fetch(destroyUrl, { method: "POST", headers: { authorization: `Bearer ${token}` } })).json()) as {
+  deletedBlobs: number;
+};
+const recreated = await open();
+const emptied = await Effect.runPromise(remote().changes(0));
+check(
+  "a deleted vault is gone, blobs too, and its id makes a new vault",
+  destroyed.deletedBlobs > 0 &&
+    emptied.entries.length === 0 &&
+    recreated._tag === "Success" &&
+    recreated.success.created &&
+    recreated.success.instance !== created.success.instance,
+  JSON.stringify({ destroyed, entries: emptied.entries.length }),
+);
+await fetch(destroyUrl, { method: "POST", headers: { authorization: `Bearer ${token}` } });
+await fetch(new URL(`/v1/vaults/${otherFormatId}/destroy?confirm=${otherFormatId}`, serverUrl), {
+  method: "POST",
+  headers: { authorization: `Bearer ${token}` },
+});
+
 socket.close();
 console.log(process.exitCode ? "SMOKE FAILED" : "SMOKE OK");
 process.exit();

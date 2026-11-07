@@ -235,6 +235,21 @@ export default class SyncWorker extends Cloudflare.Worker<SyncWorker>()(
         const blob = BLOB_ROUTE.exec(route);
         if (blob) return yield* blobs(request, vault, blob[1]!);
 
+        // Delete a whole vault: its change log and history, then every blob. Owner token, and the
+        // vault id repeated in `confirm` so a mistyped URL can't do it.
+        if (route === "/destroy" && request.method === "POST") {
+          if (searchParams.get("confirm") !== vault) return text("Repeat the vault id in ?confirm=", 400);
+          yield* callVault(vault, "/destroy", { method: "POST" });
+          let deletedBlobs = 0;
+          for (;;) {
+            const page = yield* bucket.list({ prefix: `${vault}/`, limit: 1000 });
+            if (page.objects.length === 0) break;
+            yield* bucket.delete(page.objects.map((o) => o.key));
+            deletedBlobs += page.objects.length;
+          }
+          return yield* HttpServerResponse.json({ deleted: vault, deletedBlobs });
+        }
+
         // Manual retention run (tests, or after lowering the retention window).
         if (route === "/prune" && request.method === "POST") {
           const days = Math.max(0, Number(searchParams.get("days") ?? retentionDays));

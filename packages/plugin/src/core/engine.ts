@@ -55,6 +55,12 @@ export interface EngineOptions {
   readonly onProgress?: (progress: Progress | null) => void;
   /** One entry per user-visible action, for the activity log. */
   readonly onActivity?: (activity: Activity) => void;
+  /**
+   * Id of the vault on the server (from `openPlainVault`). State saved for another vault with
+   * the same name (deleted and created again) is dropped: this device then joins like a new
+   * one. Without it (offline status), the saved state is used as is.
+   */
+  readonly vaultInstance?: string;
 }
 
 export interface Progress {
@@ -121,13 +127,20 @@ export const makeEngine = (options: EngineOptions) =>
     const vault = yield* VaultIo;
     const remote = yield* Remote;
     const store = yield* LocalState;
-    const state: SyncState = yield* store.load;
+    const loaded = yield* store.load;
+    const instance = options.vaultInstance;
+    const state: SyncState =
+      instance === undefined || (loaded.vault ?? "") === instance ? loaded : { cursor: 0, base: {}, vault: instance };
     const lock = yield* Semaphore.make(1);
     const log = options.log ?? (() => {});
     const activity = (kind: ActivityKind, path: string, detail?: string) =>
       options.onActivity?.({ kind, path, at: Date.now(), detail });
 
     const save = store.save(state);
+    if (state !== loaded) {
+      log("this vault id now names a different vault: syncing from scratch");
+      yield* save;
+    }
 
     const setBase = (path: string, entry: Entry, meta: FileMeta, stat: FileStat | null) => {
       state.base[path] = {

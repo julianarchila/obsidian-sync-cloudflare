@@ -12,6 +12,7 @@ import * as Layer from "effect/Layer";
 import { type Activity, type EngineOptions, makeEngine } from "../../plugin/src/core/engine.ts";
 import { fetchHttp, makeHttpRemote } from "../../plugin/src/core/http-remote.ts";
 import { mergeText } from "../../plugin/src/core/merge.ts";
+import { openPlainVault } from "../../plugin/src/core/plain-vault.ts";
 import { LocalState, Remote, VaultIo } from "../../plugin/src/core/services.ts";
 import { fsLocalState, fsVaultIo, STATE_DIR, writeAtomic } from "./fs-vault.ts";
 import { IGNORE_FILE, loadIgnore } from "./ignore.ts";
@@ -135,7 +136,8 @@ const activityLog = (activity: Activity) => {
   }
 };
 
-export const openVault = async (root: string, overrides: Partial<EngineOptions> = {}) => {
+/** `connect: false` skips the server (offline `status`); otherwise the vault must exist and be plain. */
+export const openVault = async (root: string, overrides: Partial<EngineOptions> = {}, { connect = true } = {}) => {
   const config = await readConfig(root);
   const token = await readToken(config);
   // Reloadable: `watch` picks up edits to .homebaseignore without a restart.
@@ -143,6 +145,7 @@ export const openVault = async (root: string, overrides: Partial<EngineOptions> 
   const isIgnored = (path: string) => ignoreRules(path);
   const io = fsVaultIo(root, isIgnored);
   const remote = makeHttpRemote({ serverUrl: config.url, vaultId: config.vault, token, http: fetchHttp() });
+  const vaultInstance = connect ? (await Effect.runPromise(openPlainVault(remote))).instance : undefined;
   const layer = Layer.mergeAll(
     Layer.succeed(VaultIo, io),
     Layer.succeed(Remote, remote),
@@ -155,6 +158,7 @@ export const openVault = async (root: string, overrides: Partial<EngineOptions> 
       merge: mergeText,
       log,
       onActivity: activityLog,
+      vaultInstance,
       ...overrides,
     }).pipe(Effect.provide(layer)),
   );

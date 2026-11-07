@@ -105,6 +105,7 @@ Deployment is managed by [Alchemy](https://alchemy.run), and its state lives in 
 - **Selective sync and settings sync:** *Settings → Homebase*. Changes from other devices to settings apply after reloading Obsidian.
 - **URIs:** `obsidian://homebase?vault=<name>&do=history&file=<path>`, `do=deleted`, `do=sync`, `do=status`.
 - **Verify your backup:** `bun scripts/verify-restore.ts <vault-id> <local-vault-folder>` downloads the whole vault as a new device would, then compares it byte for byte with your local copy.
+- **Delete a vault:** `bun scripts/delete-vault.ts <vault-id> --yes` removes it from the server for good (history and stored files); devices keep their local files. The id can be reused: devices pointed at it notice it's a new vault and join it from scratch.
 
 ## Connect your AI agents
 

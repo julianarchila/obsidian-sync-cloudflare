@@ -87,7 +87,6 @@ const ensurePlain = async (config: Config) => {
 
 const syncOnce = async (root: string, paths?: Set<string>) => {
   const vault = await openVault(root);
-  await ensurePlain(vault.config);
   try {
     const report = await Effect.runPromise(vault.engine.sync(paths));
     await writeStatus(root, { at: Date.now(), ok: true });
@@ -146,7 +145,7 @@ const main = async () => {
       // The server may not be reachable yet (boot, network down): wait for it instead of exiting.
       for (let delay = 2000; ; delay = Math.min(delay * 2, 60_000)) {
         try {
-          await ensurePlain((await openVault(root)).config);
+          await openVault(root);
           break;
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
@@ -161,7 +160,7 @@ const main = async () => {
 
     case "status": {
       const root = await dirArg(0);
-      const vault = await openVault(root, { onActivity: () => {} });
+      const vault = await openVault(root, { onActivity: () => {} }, { connect: false });
       const files = await Effect.runPromise(vault.io.list);
       const pending = await Effect.runPromise(
         vault.engine.changedLocally([...files.map((f) => f.path), ...Object.keys(vault.engine.state.base)]),

@@ -264,6 +264,7 @@ export default class CloudflareSyncPlugin extends Plugin {
       resetCursor,
       engine: {
         device,
+        vaultInstance: opened.success.instance,
         // Notes: selective sync. Config dir: per-category settings sync, never this plugin's
         // own files (token, sync state) nor per-device workspace layouts.
         isSyncable: (() => {

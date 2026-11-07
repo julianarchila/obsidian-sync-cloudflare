@@ -411,3 +411,37 @@ describe("engine: moves", () => {
     expect(server.ops.filter((op) => op === "getBlob").length).toBe(0);
   });
 });
+
+describe("engine: a vault id that names a new vault", () => {
+  test("state saved for the old vault is dropped; the device joins the new one without losing files", async () => {
+    const { Device, Server } = await import("./harness.ts");
+    const old = new Server();
+    const a = await new Device("a", old, { vaultInstance: "one" }).start();
+    a.write("note.md", "kept");
+    a.write("gone.md", "deleted here, never uploaded again");
+    await a.sync();
+    a.remove("gone.md");
+
+    // The vault was deleted and created again under the same id, and another device filled it.
+    const fresh = new Server();
+    const b = await new Device("b", fresh, { vaultInstance: "two" }).start();
+    b.write("note.md", "kept");
+    b.write("from-b.md", "new");
+    await b.sync();
+
+    const a2 = new Device("a", fresh, { vaultInstance: "two" });
+    for (const [path, file] of a.files) a2.files.set(path, file);
+    a2.state = structuredClone(a.state);
+    await a2.start();
+    expect(a2.engine.state.cursor).toBe(0);
+    await a2.sync();
+    expect(a2.snapshot()).toEqual({ "from-b.md": "new", "note.md": "kept" });
+    expect(fresh.store.history("note.md").length).toBe(1); // identical file adopted, not re-uploaded
+
+    // Same vault: the saved state is kept.
+    const a3 = new Device("a", fresh, { vaultInstance: "two" });
+    a3.state = structuredClone(a2.state);
+    await a3.start();
+    expect(a3.engine.state.cursor).toBe(a2.state.cursor);
+  });
+});

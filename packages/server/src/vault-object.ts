@@ -34,8 +34,8 @@ export const VaultObject = Cloudflare.DurableObject<Handlers>()(
     Effect.sync((): Handlers => {
       const native = state.raw;
       const sql = doSql(native.storage);
-      const store = new VaultStore(sql);
-      const index = new SearchIndex(sql);
+      let store = new VaultStore(sql);
+      let index = new SearchIndex(sql);
       // Keep-alive pings are answered by the runtime without waking this object (no billed duration).
       native.setWebSocketAutoResponse(new WebSocketRequestResponsePair("ping", "pong"));
 
@@ -62,6 +62,16 @@ export const VaultObject = Cloudflare.DurableObject<Handlers>()(
             native.acceptWebSocket(pair[1]);
             pair[1].send(JSON.stringify({ type: "seq", seq: store.seq() }));
             return raw(new Response(null, { status: 101, webSocket: pair[0] }));
+          }
+
+          // Delete the whole vault (the Worker then deletes its blobs). Devices are disconnected;
+          // the id can be used again for a new, empty vault.
+          if (route === "/destroy" && request.method === "POST") {
+            for (const socket of native.getWebSockets()) socket.close(1000, "vault deleted");
+            yield* Effect.promise(() => native.storage.deleteAll());
+            store = new VaultStore(sql);
+            index = new SearchIndex(sql);
+            return raw(Response.json({ ok: true }));
           }
 
           const result = yield* Effect.promise(() => handleVaultHttp(store, request, route, index));
