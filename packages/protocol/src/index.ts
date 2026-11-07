@@ -108,6 +108,9 @@ export const ChangesResponse = Schema.Struct({
 });
 export type ChangesResponse = typeof ChangesResponse.Type;
 
+export const MovedFromResponse = Schema.Struct({ paths: Schema.Array(PathId) });
+export type MovedFromResponse = typeof MovedFromResponse.Type;
+
 export const EntriesResponse = Schema.Struct({ entries: Schema.Array(Entry) });
 export type EntriesResponse = typeof EntriesResponse.Type;
 
@@ -136,6 +139,7 @@ export const routes = {
   commit: (vault: string) => `/v1/vaults/${vault}/commit`,
   history: (vault: string, path: string) => `/v1/vaults/${vault}/history?path=${encodeURIComponent(path)}`,
   deleted: (vault: string) => `/v1/vaults/${vault}/deleted`,
+  movedFrom: (vault: string, path: string) => `/v1/vaults/${vault}/moved-from?path=${encodeURIComponent(path)}`,
   meta: (vault: string) => `/v1/vaults/${vault}/meta`,
   replaceMeta: (vault: string) => `/v1/vaults/${vault}/meta/replace`,
   socket: (vault: string) => `/v1/vaults/${vault}/socket`,

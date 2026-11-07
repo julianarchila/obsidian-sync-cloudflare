@@ -18,11 +18,22 @@ homebase history Notes/idea.md ~/vault
 homebase restore Notes/idea.md --version 3 ~/vault
 homebase deleted ~/vault
 homebase restore-deleted Notes/old.md ~/vault
+homebase restore-deleted Archive ~/vault  # every deleted file under a folder
+cd ~/vault/Notes && homebase mv idea.md ../Projects/idea.md   # move and update [[links]]
 ```
+
+File arguments are relative to the current directory (or absolute). Without a `[dir]`, commands find the synced folder by looking upward from the current directory, like git.
+
+`homebase mv` moves a file and rewrites links to it in other notes: `[[wikilinks]]` by name or path, with `#heading`, `|alias` and `![[embeds]]`, plus Markdown links. Pass `--no-links` to skip that. A plain `mv` also syncs as a move, but leaves links alone. Moves keep the file's history, also when the file was edited in the same pass (same file name in another folder).
 
 `init` writes `<dir>/.homebase/config.json` (server URL, vault id, device name). The token is never stored there: it is read from `$OSCF_TOKEN` at run time, from another variable (`--token-env NAME`), or from a file (`--token-file PATH`). Sync state lives in `<dir>/.homebase/state.json`.
 
-Never synced: `.homebase/`, `.obsidian/`, `.git/`, `node_modules/`, `.trash/`, `.DS_Store`, and editor temp files (`*.swp`, `*~`, `.#*`). Files are written atomically (temp file, then rename).
+Never synced:
+- hidden files and folders (anything starting with `.`), as in Obsidian: `.homebase/`, `.obsidian/`, `.git/`, `.vscode/`, `.DS_Store`, editor locks;
+- common junk: `node_modules/`, `__pycache__/`, `*.tmp`, `*.orig`, `*.swp`, `*~`, `Thumbs.db`, …;
+- anything in `<dir>/.homebaseignore`, one gitignore-like pattern per line (`*`, `**`, `?`, a trailing `/` for folders, a leading `/` to anchor at the root). `init` creates an empty one. It is local to this folder.
+
+Files are written atomically (temp file, then rename). A damaged `state.json` stops the CLI instead of starting over (which could bring back files deleted elsewhere); move it away to resync from scratch.
 
 ## How `watch` works
 

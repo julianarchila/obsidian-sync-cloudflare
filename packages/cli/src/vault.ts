@@ -14,7 +14,8 @@ import { fetchHttp, makeHttpRemote } from "../../plugin/src/core/http-remote.ts"
 import { mergeText } from "../../plugin/src/core/merge.ts";
 import { plainCodec } from "../../plugin/src/core/plain-codec.ts";
 import { Codec, LocalState, Remote, VaultIo } from "../../plugin/src/core/services.ts";
-import { fsLocalState, fsVaultIo, isIgnored, STATE_DIR, writeAtomic } from "./fs-vault.ts";
+import { fsLocalState, fsVaultIo, STATE_DIR, writeAtomic } from "./fs-vault.ts";
+import { loadIgnore } from "./ignore.ts";
 
 export interface Config {
   readonly url: string;
@@ -46,6 +47,29 @@ export const readConfig = async (root: string): Promise<Config> => {
   } catch {
     throw new Error(`${root} is not a Homebase folder (run \`homebase init\` first).`);
   }
+};
+
+/** The synced folder containing `start` (looks upward, like git). */
+export const findRoot = async (start: string) => {
+  let dir = nodePath.resolve(start);
+  for (;;) {
+    try {
+      await fs.access(configPath(dir));
+      return dir;
+    } catch {
+      const parent = nodePath.dirname(dir);
+      if (parent === dir) throw new Error(`${nodePath.resolve(start)} is not inside a Homebase folder (run \`homebase init\` first).`);
+      dir = parent;
+    }
+  }
+};
+
+/** A file argument (relative to the current directory, or absolute) as a vault path. */
+export const vaultPath = (root: string, arg: string) => {
+  const relative = nodePath.relative(root, nodePath.resolve(arg));
+  if (relative === "" || relative.startsWith("..") || nodePath.isAbsolute(relative))
+    throw new Error(`${arg} is not inside ${root}.`);
+  return relative.split(nodePath.sep).join("/").normalize("NFC");
 };
 
 export const readToken = async (config: Pick<Config, "tokenEnv" | "tokenFile">) => {
@@ -88,9 +112,11 @@ export const formatActivity = (a: Activity) =>
 export const openVault = async (root: string, overrides: Partial<EngineOptions> = {}) => {
   const config = await readConfig(root);
   const token = await readToken(config);
+  const isIgnored = await loadIgnore(root);
+  const io = fsVaultIo(root, isIgnored);
   const remote = makeHttpRemote({ serverUrl: config.url, vaultId: config.vault, token, http: fetchHttp() });
   const layer = Layer.mergeAll(
-    Layer.succeed(VaultIo, fsVaultIo(root)),
+    Layer.succeed(VaultIo, io),
     Layer.succeed(Remote, remote),
     Layer.succeed(Codec, plainCodec),
     Layer.succeed(LocalState, fsLocalState(root)),
@@ -107,5 +133,5 @@ export const openVault = async (root: string, overrides: Partial<EngineOptions> 
   );
   const run = <A, E>(effect: Effect.Effect<A, E, VaultIo | Remote | Codec | LocalState>) =>
     Effect.runPromise(effect.pipe(Effect.provide(layer)));
-  return { config, token, remote, engine, run, io: fsVaultIo(root) };
+  return { config, token, remote, engine, run, io, isIgnored };
 };

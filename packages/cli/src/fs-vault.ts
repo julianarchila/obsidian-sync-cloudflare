@@ -19,24 +19,7 @@ import { isSafePath } from "../../plugin/src/core/plain-codec.ts";
 
 export const STATE_DIR = ".homebase";
 
-const IGNORED_DIRS = new Set([STATE_DIR, ".obsidian", ".git", "node_modules", ".trash"]);
-const TEMP_MARK = ".homebase-tmp-";
-
-/** Paths the CLI never syncs: internal state, app config, VCS, editor temp files. */
-export const isIgnored = (path: string) => {
-  const parts = path.split("/");
-  if (parts.some((part) => IGNORED_DIRS.has(part))) return true;
-  const name = parts.at(-1) ?? "";
-  return (
-    name === ".DS_Store" ||
-    name === "4913" ||
-    name.endsWith(".swp") ||
-    name.endsWith(".swx") ||
-    name.endsWith("~") ||
-    name.startsWith(".#") ||
-    name.includes(TEMP_MARK)
-  );
-};
+export const TEMP_MARK = ".homebase-tmp-";
 
 const vaultError = (path: string) => (error: unknown) =>
   new VaultError({ path, message: error instanceof Error ? error.message : String(error) });
@@ -57,7 +40,7 @@ const toStat = (path: string, stat: { mtimeMs: number; size: number }): FileStat
   size: stat.size,
 });
 
-export const fsVaultIo = (root: string): VaultIoShape => {
+export const fsVaultIo = (root: string, isIgnored: (path: string) => boolean): VaultIoShape => {
   const base = nodePath.resolve(root);
   /** Absolute path inside the vault; anything that would escape it is refused. */
   const abs = (path: string) => {
@@ -141,11 +124,17 @@ export const fsLocalState = (root: string): LocalStateShape => {
   const file = nodePath.join(root, STATE_DIR, "state.json");
   return {
     load: Effect.promise(async () => {
+      let text: string;
       try {
-        return JSON.parse(await fs.readFile(file, "utf8")) as SyncState;
+        text = await fs.readFile(file, "utf8");
       } catch {
-        return { cursor: 0, base: {} };
+        return { cursor: 0, base: {} }; // first run
       }
+      // A damaged state must not be mistaken for "nothing synced yet" (that would resurrect deletions).
+      const state = JSON.parse(text) as Partial<SyncState>;
+      if (typeof state.cursor !== "number" || typeof state.base !== "object" || state.base === null)
+        throw new Error(`${file} is damaged; move it away to resync this folder from scratch.`);
+      return state as SyncState;
     }),
     save: (state) => Effect.promise(() => writeAtomic(file, JSON.stringify(state))),
   };

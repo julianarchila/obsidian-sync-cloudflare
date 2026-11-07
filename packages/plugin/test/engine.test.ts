@@ -333,3 +333,49 @@ describe("engine: files this device can't write", () => {
     expect(server.store.current("Clippings/Is it S3?.md")?.deleted).toBe(false);
   });
 });
+
+describe("engine: moves", () => {
+  test("a move edited in the same pass keeps its history", async () => {
+    const { server, devices: [a, b] } = await setup();
+    a!.write("Inbox/Plan.md", "v1\n");
+    await a!.sync();
+    await b!.sync();
+    a!.rename("Inbox/Plan.md", "Projects/Plan.md");
+    a!.write("Projects/Plan.md", "v1\nedited while moving\n");
+    await a!.sync();
+    await b!.sync();
+    expect(b!.snapshot()).toEqual({ "Projects/Plan.md": "v1\nedited while moving\n" });
+    // Recorded as a move plus an edit, not a delete and an unrelated new file.
+    expect(server.store.movedFrom("Projects/Plan.md")).toEqual(["Inbox/Plan.md"]);
+    expect(server.store.history("Projects/Plan.md").length).toBe(2);
+    expect(server.store.deleted().length).toBe(0);
+  });
+
+  test("moved offline while edited elsewhere: the edit lands at the new path, no duplicate", async () => {
+    const { devices: [a, b] } = await setup();
+    a!.write("Trip.md", "draft\n");
+    await a!.sync();
+    await b!.sync();
+    b!.rename("Trip.md", "Travel/Trip.md"); // b is offline: not synced yet
+    a!.write("Trip.md", "draft\nedited on a\n");
+    await a!.sync();
+    await b!.sync();
+    await a!.sync();
+    expect(b!.snapshot()).toEqual({ "Travel/Trip.md": "draft\nedited on a\n" });
+    expect(a!.snapshot()).toEqual(b!.snapshot());
+  });
+
+  test("receiving a rename reuses the local bytes instead of downloading them again", async () => {
+    const { server, devices: [a, b] } = await setup();
+    for (let i = 0; i < 20; i++) a!.write(`Old/n${i}.md`, `note ${i}`);
+    await a!.sync();
+    await b!.sync();
+    for (let i = 0; i < 20; i++) a!.rename(`Old/n${i}.md`, `New/n${i}.md`);
+    await a!.sync();
+    server.ops = [];
+    await b!.sync();
+    expect(Object.keys(b!.snapshot()).every((p) => p.startsWith("New/"))).toBe(true);
+    expect(Object.keys(b!.snapshot()).length).toBe(20);
+    expect(server.ops.filter((op) => op === "getBlob").length).toBe(0);
+  });
+});

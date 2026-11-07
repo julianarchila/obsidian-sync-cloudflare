@@ -23,8 +23,9 @@ const check = (label: string, ok: boolean, detail = "") => {
   if (!ok) failures++;
 };
 
-const cli = async (...args: string[]) => {
-  const proc = Bun.spawn(["bun", CLI, ...args], { stdout: "pipe", stderr: "pipe" });
+const cli = (...args: string[]) => cliIn(process.cwd(), ...args);
+const cliIn = async (cwd: string, ...args: string[]) => {
+  const proc = Bun.spawn(["bun", CLI, ...args], { stdout: "pipe", stderr: "pipe", cwd });
   const [out, err, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
   if (code !== 0) throw new Error(`homebase ${args.join(" ")} failed (${code}): ${err || out}`);
   return out;
@@ -149,6 +150,61 @@ check("status reports the pending change", statusOut.includes("pending: 1") && s
 await cli("sync", A);
 await cli("sync", B);
 check("ignored paths never sync", !(await exists(B, ".obsidian/workspace.json")) && !(await exists(B, ".git/HEAD")) && !(await exists(B, "Notes/.note.md.swp")));
+
+// ------------------------------------------------------------ .homebaseignore
+check("init creates an empty .homebaseignore", await exists(A, ".homebaseignore"));
+await write(A, ".homebaseignore", "# local only\ndrafts/\n*.log\n/build\n");
+await write(A, "drafts/wip.md", "wip\n");
+await write(A, "Notes/run.log", "log\n");
+await write(A, "build/out.md", "out\n");
+await write(A, "Notes/build/kept.md", "kept\n");
+await write(A, ".vscode/settings.json", "{}");
+await write(A, "tools/__pycache__/x.pyc", "x");
+await write(A, "Notes/a.tmp", "x");
+await cli("sync", A);
+await cli("sync", B);
+check(
+  ".homebaseignore patterns and defaults are never synced",
+  !(await exists(B, "drafts/wip.md")) &&
+    !(await exists(B, "Notes/run.log")) &&
+    !(await exists(B, "build/out.md")) &&
+    !(await exists(B, ".vscode/settings.json")) &&
+    !(await exists(B, "tools/__pycache__/x.pyc")) &&
+    !(await exists(B, "Notes/a.tmp")),
+);
+check("an anchored pattern only matches at the root", (await read(B, "Notes/build/kept.md")) === "kept\n");
+
+// ------------------------------------------------------------ mv with links, paths relative to the current directory
+await write(A, "Meetings/Kickoff.md", "# Kickoff\n");
+await write(A, "Projects/Atlas.md", "See [[Kickoff]], [[Meetings/Kickoff|the kickoff]], ![[Kickoff#Notes]] and [md](Meetings/Kickoff.md).\n");
+await cli("sync", A);
+await cli("sync", B);
+const mvOut = await cliIn(path.join(A, "Meetings"), "mv", "Kickoff.md", "../Archive/Kickoff 2026.md");
+await cli("sync", B);
+check(
+  "homebase mv moves the file and rewrites links (run from a subfolder)",
+  (await read(B, "Archive/Kickoff 2026.md")) === "# Kickoff\n" &&
+    !(await exists(B, "Meetings/Kickoff.md")) &&
+    (await read(B, "Projects/Atlas.md")) ===
+      "See [[Kickoff 2026]], [[Archive/Kickoff 2026|the kickoff]], ![[Kickoff 2026#Notes]] and [md](Archive/Kickoff%202026.md).\n",
+  mvOut.trim().split("\n").at(-1),
+);
+const movedHistory = await cliIn(A, "history", "Archive/Kickoff 2026.md");
+check("history follows the move", movedHistory.includes("(as Meetings/Kickoff.md)") && movedHistory.includes("moved"), movedHistory.trim());
+check("moved files are not listed as deleted", !(await cli("deleted", A)).includes("Meetings/Kickoff.md"));
+
+// ------------------------------------------------------------ restore a deleted folder
+await write(A, "Old/one.md", "1\n");
+await write(A, "Old/two.md", "2\n");
+await cli("sync", A);
+await fs.rm(path.join(A, "Old"), { recursive: true });
+await cli("sync", A);
+await cli("sync", B);
+const restoreFolder = await cliIn(A, "restore-deleted", "Old");
+await cli("sync", B);
+check("restore-deleted restores a whole folder", (await read(B, "Old/one.md")) === "1\n" && (await read(B, "Old/two.md")) === "2\n", restoreFolder.trim().split("\n").at(-1));
+const notDeleted = await cliIn(A, "restore-deleted", "Projects/Atlas.md").then(() => "ok", (e: Error) => e.message);
+check("restore-deleted refuses a file that exists", notDeleted.includes("isn't deleted"), notDeleted.slice(0, 120));
 
 // ------------------------------------------------------------ watch
 const spawnWatch = (dir: string) => {

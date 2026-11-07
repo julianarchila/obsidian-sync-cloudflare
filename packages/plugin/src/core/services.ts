@@ -48,6 +48,8 @@ export interface RemoteShape {
   readonly commit: (ops: ReadonlyArray<Op>) => Effect.Effect<ReadonlyArray<OpResult>, RemoteError>;
   readonly history: (pathId: string) => Effect.Effect<ReadonlyArray<Entry>, RemoteError>;
   readonly deleted: Effect.Effect<ReadonlyArray<Entry>, RemoteError>;
+  /** Path ids this one was renamed from, newest first (servers without it: none). */
+  readonly movedFrom?: (pathId: string) => Effect.Effect<ReadonlyArray<string>, RemoteError>;
   /** Read the vault meta, or create it when `init` is given and none exists. */
   readonly meta: (init?: string) => Effect.Effect<{ meta: string | null; created: boolean }, RemoteError>;
   /** Compare-and-swap the vault meta (password change). */

@@ -27,7 +27,7 @@ export const Blobs = Cloudflare.R2.Bucket("Blobs");
 const VAULT_ROUTE = /^\/v1\/vaults\/([^/]+)(\/.*)$/;
 const MCP_ROUTE = /^\/mcp\/([^/]+)\/?$/;
 const BLOB_ROUTE = /^\/blobs\/([0-9a-f]{64})$/;
-const DO_ROUTES = new Set(["/changes", "/commit", "/history", "/deleted", "/meta", "/meta/replace", "/socket"]);
+const DO_ROUTES = new Set(["/changes", "/commit", "/history", "/deleted", "/moved-from", "/meta", "/meta/replace", "/socket"]);
 /** Orphan uploads (never committed) younger than this are left alone. */
 const ORPHAN_GRACE_MS = 24 * 60 * 60 * 1000;
 
