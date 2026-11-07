@@ -1,9 +1,8 @@
 /**
- * Vault format check (no end-to-end encryption).
- *
- * The vault meta on the server records the format. A new vault is marked
- * `plain-v1` by the first device. A vault created by an older, encrypted build
- * holds a key-wrapping record instead: refuse it rather than mixing formats.
+ * Vault format check. The vault meta on the server records the format: a
+ * new vault is marked `plain-v1` by the first device. A vault in any other
+ * format (such as one left by the end-to-end encrypted versions before 0.3)
+ * is refused rather than mixed.
  */
 import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
@@ -30,7 +29,7 @@ export const openPlainVault = (remote: RemoteShape): Effect.Effect<{ created: bo
     const result = yield* remote.meta(PLAIN_META);
     if (!isPlainMeta(result.meta))
       return yield* new VaultFormatError({
-        message: "This vault was created with end-to-end encryption, which this version no longer supports. Use a new vault id.",
+        message: "This vault uses a format this version doesn't support (for example, it was created by an encrypted version before 0.3). Use a new vault id.",
       });
     return { created: result.created };
   });

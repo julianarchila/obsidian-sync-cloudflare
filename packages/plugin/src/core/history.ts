@@ -8,7 +8,8 @@ import type { Entry } from "@oscf/protocol";
 import * as Effect from "effect/Effect";
 
 import { concat } from "./bytes.ts";
-import { Codec, Remote, VaultIo } from "./services.ts";
+import { decodeMeta } from "./file-meta.ts";
+import { Remote, VaultIo } from "./services.ts";
 
 export interface VersionInfo {
   readonly path: string;
@@ -24,8 +25,7 @@ export interface VersionInfo {
 
 const describe = (entry: Entry) =>
   Effect.gen(function* () {
-    const codec = yield* Codec;
-    const meta = yield* codec.openMeta(entry.path, entry.meta);
+    const meta = yield* decodeMeta(entry.path, entry.meta);
     return {
       path: meta.path,
       version: entry.version,
@@ -41,11 +41,10 @@ const describe = (entry: Entry) =>
 /** All retained versions of a file, newest first, following it back through renames. */
 export const fileHistory = (path: string) =>
   Effect.gen(function* () {
-    const codec = yield* Codec;
     const remote = yield* Remote;
     const entries: Entry[] = [];
     const seen = new Set<string>();
-    let pathId: string | undefined = yield* codec.pathId(path);
+    let pathId: string | undefined = path;
     while (pathId !== undefined && !seen.has(pathId) && seen.size < 20) {
       seen.add(pathId);
       entries.push(...(yield* remote.history(pathId)));
@@ -54,14 +53,11 @@ export const fileHistory = (path: string) =>
     return yield* Effect.forEach(entries, describe);
   });
 
-/** Plaintext content of one version. */
+/** Content of one version. */
 export const readVersion = (info: Pick<VersionInfo, "entry">) =>
   Effect.gen(function* () {
-    const codec = yield* Codec;
     const remote = yield* Remote;
-    const chunks = yield* Effect.forEach(info.entry.chunks, (hash) => remote.getBlob(hash).pipe(Effect.flatMap(codec.openChunk)), {
-      concurrency: 4,
-    });
+    const chunks = yield* Effect.forEach(info.entry.chunks, (hash) => remote.getBlob(hash), { concurrency: 4 });
     return concat(chunks);
   });
 

@@ -5,7 +5,6 @@ import { type ConfigSyncSettings, DEFAULT_CONFIG_SYNC, makeIsConfigSyncable, mer
 import { DEFAULT_SELECTIVE, makeIsSyncable, type SelectiveSettings, selectiveFingerprint } from "./core/filter.ts";
 import { makeHttpRemote } from "./core/http-remote.ts";
 import { mergeText } from "./core/merge.ts";
-import { plainCodec } from "./core/plain-codec.ts";
 import { openPlainVault } from "./core/plain-vault.ts";
 import { combinedVaultIo, obsidianConfigIo, obsidianHttp, obsidianLocalState, obsidianVaultIo } from "./obsidian/adapters.ts";
 import { DeletedFilesModal, HistoryModal } from "./obsidian/history-modal.ts";
@@ -39,12 +38,12 @@ const DEFAULTS: Settings = {
 };
 
 const CONFIG_POLL_MS = 30_000;
-const UNLOCK_RETRY_MIN_MS = 5_000;
-const UNLOCK_RETRY_MAX_MS = 60_000;
+const OPEN_RETRY_MIN_MS = 5_000;
+const OPEN_RETRY_MAX_MS = 60_000;
 
 export default class CloudflareSyncPlugin extends Plugin {
   data: Data = { settings: { ...DEFAULTS } };
-  lockMessage = "";
+  openError = "";
   private client: SyncClient | undefined;
   readonly sync = new SyncStatus();
   private statusBar!: HTMLElement;
@@ -52,22 +51,17 @@ export default class CloudflareSyncPlugin extends Plugin {
   private reloadNotice: number | undefined;
   /** A long transfer in progress (announced with a notice when it starts and ends). */
   private bigTransfer = false;
-  /** Server unreachable while unlocking (e.g. opened before the network was up): retry. */
-  private unlockRetry: number | undefined;
-  private unlockBackoff = UNLOCK_RETRY_MIN_MS;
+  /** Server unreachable while opening the vault (e.g. opened before the network was up): retry. */
+  private openRetry: number | undefined;
+  private openBackoff = OPEN_RETRY_MIN_MS;
 
   get conf() {
     return this.data.settings;
   }
 
   override async onload() {
-    const stored = (await this.loadData()) as (Partial<Data> & { key?: unknown }) | null;
-    // Settings from the end-to-end encrypted versions: drop the stored vault key and its options.
-    const { rememberKey: _rememberKey, password: _password, ...settings } = (stored?.settings ?? {}) as Partial<Settings> & {
-      rememberKey?: unknown;
-      password?: unknown;
-    };
-    const legacy = stored?.key !== undefined || _rememberKey !== undefined || _password !== undefined;
+    const stored = (await this.loadData()) as Partial<Data> | null;
+    const settings: Partial<Settings> = stored?.settings ?? {};
     this.data = {
       settings: {
         ...DEFAULTS,
@@ -80,7 +74,6 @@ export default class CloudflareSyncPlugin extends Plugin {
       },
       selectiveFingerprint: stored?.selectiveFingerprint,
     };
-    if (legacy) await this.saveData(this.data);
 
     // Status: ribbon icon (also on mobile, where plugin status bar items are hidden) + desktop status bar.
     this.statusBar = this.addStatusBarItem();
@@ -132,7 +125,7 @@ export default class CloudflareSyncPlugin extends Plugin {
       // The config dir has no vault events: poll it (stat-only unless something changed).
       this.registerInterval(window.setInterval(() => void this.pollConfig(), CONFIG_POLL_MS));
       this.registerDomEvent(window, "online", () => {
-        if (this.unlockRetry !== undefined) void this.restart();
+        if (this.openRetry !== undefined) void this.restart();
       });
       void this.restart();
     });
@@ -228,35 +221,34 @@ export default class CloudflareSyncPlugin extends Plugin {
   }
 
   async restart() {
-    window.clearTimeout(this.unlockRetry);
-    this.unlockRetry = undefined;
+    window.clearTimeout(this.openRetry);
+    this.openRetry = undefined;
     this.client?.stop();
     this.client = undefined;
     const { serverUrl, vaultId, token, device } = this.conf;
     if (!serverUrl || !vaultId || !token) return this.setState("not-configured");
 
     // ---- open the vault (created as plain on first use)
-    this.setState("unlocking");
+    this.setState("opening");
     const remote = makeHttpRemote({ serverUrl, vaultId, token, http: obsidianHttp });
     const opened = await Effect.runPromise(openPlainVault(remote).pipe(Effect.result));
     if (opened._tag === "Failure") {
       const error = opened.failure;
-      this.lockMessage = error._tag === "RemoteError" ? `Server unreachable: ${error.message}` : error.message;
-      this.setState(error._tag === "RemoteError" ? "offline" : "locked", this.lockMessage);
-      if (error._tag !== "RemoteError") new Notice(`Homebase: ${this.lockMessage}`);
+      this.openError = error._tag === "RemoteError" ? `Server unreachable: ${error.message}` : error.message;
+      this.setState(error._tag === "RemoteError" ? "offline" : "error", this.openError);
+      if (error._tag !== "RemoteError") new Notice(`Homebase: ${this.openError}`);
       else {
         // Retry with backoff; coming back online retries right away.
-        this.unlockRetry = window.setTimeout(() => void this.restart(), this.unlockBackoff);
-        this.unlockBackoff = Math.min(this.unlockBackoff * 2, UNLOCK_RETRY_MAX_MS);
+        this.openRetry = window.setTimeout(() => void this.restart(), this.openBackoff);
+        this.openBackoff = Math.min(this.openBackoff * 2, OPEN_RETRY_MAX_MS);
       }
       return;
     }
-    this.unlockBackoff = UNLOCK_RETRY_MIN_MS;
-    this.lockMessage = "";
+    this.openBackoff = OPEN_RETRY_MIN_MS;
+    this.openError = "";
     if (opened.success.created) new Notice("Homebase: new vault created.");
 
     // ---- start syncing
-    const codec = plainCodec;
     const pluginDir = this.manifest.dir ?? "";
     const configDir = this.app.vault.configDir;
     const fingerprint = `${selectiveFingerprint(this.conf.selective)}|${JSON.stringify(this.conf.configSync)}`;
@@ -269,12 +261,11 @@ export default class CloudflareSyncPlugin extends Plugin {
       token,
       vaultIo: combinedVaultIo(obsidianVaultIo(this.app), obsidianConfigIo(this.app, configDir), configDir),
       localState: obsidianLocalState(this.app, this.stateFile),
-      codec,
       resetCursor,
       engine: {
         device,
         // Notes: selective sync. Config dir: per-category settings sync, never this plugin's
-        // own files (token, key, sync state) nor per-device workspace layouts.
+        // own files (token, sync state) nor per-device workspace layouts.
         isSyncable: (() => {
           const notes = makeIsSyncable(this.conf.selective, [pluginDir]);
           const config = makeIsConfigSyncable(configDir, this.conf.configSync, this.manifest.id);
@@ -337,7 +328,7 @@ class SettingsTab extends PluginSettingTab {
     text("Token", "The OSCF_TOKEN you deployed with.", "token", true);
     text("Device name", "Shown in conflict file names.", "device");
 
-    if (this.plugin.lockMessage) containerEl.createEl("p", { text: this.plugin.lockMessage, cls: "mod-warning" });
+    if (this.plugin.openError) containerEl.createEl("p", { text: this.plugin.openError, cls: "mod-warning" });
 
     new Setting(containerEl).setHeading().setName("Selective sync");
     new Setting(containerEl)

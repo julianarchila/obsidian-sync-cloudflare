@@ -4,7 +4,6 @@
  * The Durable Object never sees file contents (they live in R2), so the Worker
  * keeps the index current: `pending` lists head entries newer than what was
  * indexed, the Worker reads their text and hands it back with `apply`.
- * Only possible because vaults are stored without end-to-end encryption.
  */
 import type { Sql } from "./store.ts";
 

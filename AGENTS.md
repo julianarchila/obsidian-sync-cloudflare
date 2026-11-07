@@ -8,9 +8,9 @@
 2. Log in to Cloudflare once with `bun alchemy profile edit --add Cloudflare`. The user has to complete the browser OAuth step.
 3. Copy `.env.example` to `.env` and set `OSCF_TOKEN` (`openssl rand -hex 32`). If the user keeps secrets in a manager such as Doppler, run every command through it, for example `doppler run -- bun run deploy`.
 4. Run `bun run deploy`. It prints the Worker URL; save it as `OSCF_URL`.
+   - Alchemy also reads `.env`. If secrets come from a manager but a local `.env` exists (for `bun run dev`), keep the dev values out of production: `doppler run -- node_modules/.bin/alchemy deploy --env-file /dev/null`.
 5. Run `bun run smoke` to verify the deployment against that URL.
 6. Build the plugin with `bun run plugin:build` (or install it from a GitHub release with BRAT). See the README for the device setup, connecting Claude or ChatGPT (MCP and OAuth) and the CLI on an always-on machine.
-7. A user coming from an encrypted version follows `docs/MIGRATION.md`.
 
 ## Rules
 
@@ -31,7 +31,7 @@
   - Plugin URIs: use `do=` (`action` is reserved) and `file=` (Obsidian treats `path=` as a filesystem path).
   - A native alert can block a graceful quit; the script dismisses it and escalates to SIGTERM.
   - Run `focus-window` before taking screenshots.
-- `scripts/verify-restore.ts` is a read-only restore drill. It downloads a whole vault (decrypting legacy encrypted ones) and compares it byte for byte with a local folder.
+- `scripts/verify-restore.ts` is a read-only restore drill. It downloads a whole vault and compares it byte for byte with a local folder.
 
 ## Architecture
 
@@ -43,7 +43,7 @@
   - `mcp.ts` (tools, scopes), `vault-ops.ts` (the Worker as a device: reads, compare-and-swap writes) and `oauth.ts` (stateless OAuth 2.1, tokens signed with a key derived from `OSCF_TOKEN`) make the MCP endpoint `/mcp/<vault>`.
 - `packages/plugin/src/core`: the Effect sync engine, shared by the plugin and the CLI, with no Obsidian imports.
   - `engine.ts` is the reconcile logic (merge, conflicts, move detection).
-  - `plain-codec.ts` and `plain-vault.ts`: the `plain-v1` format. `legacy/` holds the old encryption, used only to read encrypted vaults.
+  - `plain-vault.ts`: the `plain-v1` vault format check. `file-meta.ts`: per-file metadata, validated against its path.
   - `filter.ts`: selective sync. `config.ts`: settings sync.
   - `merge.ts`: Myers diff and diff3. `links.ts`: link rewriting on moves.
   - `history.ts`: version history and recovery.

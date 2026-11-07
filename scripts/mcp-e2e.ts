@@ -260,15 +260,15 @@ if (workToken) check("a client token only opens its vaults", (await call("list_n
 // ---- config dir is off limits
 check("paths in .obsidian are refused", (await call("read_note", { path: ".obsidian/app.json" })).isError);
 
-// ---- encrypted vaults are refused
-const encryptedId = `${vaultId}-enc`;
-await fetch(`${serverUrl}/v1/vaults/${encryptedId}/meta`, {
+// ---- vaults in another format (e.g. from the encrypted versions) are refused
+const otherFormatId = `${vaultId}-enc`;
+await fetch(`${serverUrl}/v1/vaults/${otherFormatId}/meta`, {
   method: "PUT",
   headers: { authorization: `Bearer ${token}` },
   body: JSON.stringify({ v: 1, salt: "x", iterations: 600000, wrapped: "y" }),
 });
-const encrypted = await call("list_notes", {}, token, encryptedId);
-check("an end-to-end encrypted vault is refused with a clear message", encrypted.status === 409, `${encrypted.status} ${encrypted.text}`);
+const otherFormat = await call("list_notes", {}, token, otherFormatId);
+check("a vault in another format is refused with a clear message", otherFormat.status === 409, `${otherFormat.status} ${otherFormat.text}`);
 
 console.log(process.exitCode ? "MCP E2E FAILED" : "MCP E2E OK");
 process.exit();

@@ -4,13 +4,13 @@
  */
 import type { Activity, Progress } from "../core/engine.ts";
 
-export type SyncState = "not-configured" | "unlocking" | "locked" | "connecting" | "syncing" | "synced" | "offline";
+export type SyncState = "not-configured" | "opening" | "error" | "connecting" | "syncing" | "synced" | "offline";
 
 const MAX_ACTIVITY = 200;
 
 export class SyncStatus {
   state: SyncState = "not-configured";
-  /** Extra context for the state (lock reason, last error). */
+  /** Extra context for the state (why the vault can't be opened, last error). */
   message = "";
   /** Persistent notice that survives state changes (e.g. files skipped on this device). */
   warning = "";
@@ -54,8 +54,8 @@ export class SyncStatus {
 
 export const STATE_LABEL: Record<SyncState, string> = {
   "not-configured": "Not configured",
-  unlocking: "Unlocking…",
-  locked: "Locked",
+  opening: "Opening vault…",
+  error: "Error",
   connecting: "Connecting…",
   syncing: "Syncing…",
   synced: "Synced",
@@ -65,8 +65,8 @@ export const STATE_LABEL: Record<SyncState, string> = {
 /** Lucide icon names shipped with Obsidian. */
 export const STATE_ICON: Record<SyncState, string> = {
   "not-configured": "cloud-cog",
-  unlocking: "key-round",
-  locked: "lock",
+  opening: "loader",
+  error: "alert-triangle",
   connecting: "loader",
   syncing: "refresh-cw",
   synced: "cloud",

@@ -46,7 +46,7 @@ Claude, ChatGPT ─┘  (MCP)    │
 
 ## Security
 
-Homebase stores your notes **unencrypted** in your own Cloudflare account, so your agents and the search index can read them. Earlier versions (up to 0.2) were end-to-end encrypted; see [Migrating from an encrypted vault](docs/MIGRATION.md).
+Homebase stores your notes **unencrypted** in your own Cloudflare account, so your agents and the search index can read them. Versions up to 0.2 were end-to-end encrypted; 0.3 can't open those vaults, so connect your devices to a new vault id.
 
 - **In transit and at rest:** HTTPS everywhere; Cloudflare encrypts R2 and Durable Object storage at rest. Cloudflare, as your infrastructure provider, could technically read your data, as with iCloud or Google Drive.
 - **The deploy token** (`OSCF_TOKEN`) gives full access to your vaults. Keep it secret, and use 2FA on your Cloudflare account. If it leaks, set a new one and redeploy: that also revokes every connected agent.
@@ -154,7 +154,6 @@ bun run release      # builds the plugin and publishes a GitHub release
 | `packages/plugin` | `src/core`: the sync engine (Effect, headless-testable), shared with the CLI. `src/obsidian`: Obsidian adapters and UI |
 | `packages/cli` | `homebase`, headless sync for always-on machines and shell agents |
 | `docs/SCOPE.md` | Design decisions and milestones |
-| `docs/MIGRATION.md` | Moving from an end-to-end encrypted vault (versions up to 0.2) |
 | `AGENTS.md` | Notes for coding agents working on (or deploying) this repo |
 
 ## License

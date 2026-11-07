@@ -123,16 +123,6 @@ export class VaultStore {
     });
   }
 
-  /** Replace the vault meta only if it is still `expected` (e.g. a password change). */
-  replaceMeta(expected: string, next: string): { meta: string | null; replaced: boolean } {
-    return this.sql.transaction(() => {
-      const existing = this.sql.all<{ v: string }>("SELECT v FROM kv WHERE k = 'meta'")[0]?.v ?? null;
-      if (existing !== expected) return { meta: existing, replaced: false };
-      this.sql.run("UPDATE kv SET v = ? WHERE k = 'meta'", next);
-      return { meta: next, replaced: true };
-    });
-  }
-
   /** Apply ops in order; each op is its own compare-and-swap. */
   commit(ops: ReadonlyArray<Op>): OpResult[] {
     return ops.map((op) => this.sql.transaction(() => this.apply(op)));

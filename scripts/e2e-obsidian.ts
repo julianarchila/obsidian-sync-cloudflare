@@ -109,7 +109,7 @@ const launchObsidian = async () => {
       ?? /"ref_id":"([^"]+)"[^}]*"name":"Trust author and enable plugins"/.exec(snap)?.[1];
     if (ref) await $`agent-desktop click ${ref}`.quiet().nothrow();
   }
-  // Let the plugin unlock and register its handlers before anything is sent to it.
+  // Let the plugin open the vault and register its handlers before anything is sent to it.
   await sleep(8000);
   await dismissAlerts();
 };

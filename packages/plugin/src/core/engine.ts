@@ -2,7 +2,7 @@
  * Sync engine: reconciles three views of every path.
  *
  *   local  – bytes on this device
- *   base   – what this device last agreed with the server (version + plaintext hash)
+ *   base   – what this device last agreed with the server (version + content hash)
  *   remote – the server's change log
  *
  *   local == base, remote moved   -> pull
@@ -20,10 +20,10 @@ import * as Effect from "effect/Effect";
 import * as Semaphore from "effect/Semaphore";
 
 import { concat, sha256, split } from "./bytes.ts";
+import { decodeMeta, encodeMeta } from "./file-meta.ts";
 import {
   type BaseEntry,
-  Codec,
-  type CodecError,
+  type MetaError,
   type FileMeta,
   type FileStat,
   LocalState,
@@ -88,7 +88,7 @@ export interface Activity {
 const LARGE_BYTES = 1024 * 1024;
 const NOTE_EXT = /\.(md|canvas|base|txt|json)$/i;
 
-export type SyncError = RemoteError | VaultError | CodecError;
+export type SyncError = RemoteError | VaultError | MetaError;
 
 export interface SyncReport {
   pulled: number;
@@ -120,7 +120,6 @@ export const makeEngine = (options: EngineOptions) =>
   Effect.gen(function* () {
     const vault = yield* VaultIo;
     const remote = yield* Remote;
-    const codec = yield* Codec;
     const store = yield* LocalState;
     const state: SyncState = yield* store.load;
     const lock = yield* Semaphore.make(1);
@@ -144,19 +143,16 @@ export const makeEngine = (options: EngineOptions) =>
     // ---------------------------------------------------------------- content
 
     const download = (chunks: ReadonlyArray<string>) =>
-      Effect.forEach(chunks, (hash) => remote.getBlob(hash).pipe(Effect.flatMap(codec.openChunk)), {
-        concurrency: 4,
-      }).pipe(Effect.map(concat));
+      Effect.forEach(chunks, (hash) => remote.getBlob(hash), { concurrency: 4 }).pipe(Effect.map(concat));
 
-    /** Seal and upload a file's chunks, skipping ones the server already has from the base version. */
+    /** Upload a file's chunks, skipping ones the server already has from the base version. */
     const upload = (bytes: Uint8Array, known: ReadonlyArray<string>) =>
       Effect.forEach(
         split(bytes, CHUNK_SIZE),
         (chunk) =>
           Effect.gen(function* () {
-            const sealed = yield* codec.sealChunk(chunk);
-            const hash = yield* sha256(sealed);
-            if (!known.includes(hash)) yield* remote.putBlob(hash, sealed);
+            const hash = yield* sha256(chunk);
+            if (!known.includes(hash)) yield* remote.putBlob(hash, chunk);
             return hash;
           }),
         { concurrency: 4 },
@@ -294,8 +290,8 @@ export const makeEngine = (options: EngineOptions) =>
           const work: Array<{ entry: Entry; meta: FileMeta; size: number; small: boolean }> = [];
           for (const entry of page.entries) {
             // Unreadable or unsafe metadata (e.g. a path escaping the vault): skip that entry only.
-            const meta = yield* codec.openMeta(entry.path, entry.meta).pipe(
-              Effect.catchTag("CodecError", (error) =>
+            const meta = yield* decodeMeta(entry.path, entry.meta).pipe(
+              Effect.catchTag("MetaError", (error) =>
                 Effect.sync(() => {
                   report.skipped++;
                   log(`skipped ${entry.path}: ${error.message}`);
@@ -389,14 +385,13 @@ export const makeEngine = (options: EngineOptions) =>
 
     const putOp = (change: LocalChange, baseVersion: number | null) =>
       Effect.gen(function* () {
-        const pathId = yield* codec.pathId(change.path);
         const chunks = yield* upload(change.bytes, change.base?.chunks ?? []);
         const op: Op = {
           op: "put",
-          path: pathId,
+          path: change.path,
           baseVersion,
           chunks,
-          meta: yield* codec.sealMeta(pathId, metaFor(change)),
+          meta: encodeMeta(metaFor(change)),
           device: options.device,
         };
         return op;
@@ -432,7 +427,7 @@ export const makeEngine = (options: EngineOptions) =>
                 }
                 continue;
               }
-              const meta = yield* codec.openMeta(current.path, current.meta);
+              const meta = yield* decodeMeta(current.path, current.meta);
               if (meta.hash === change.hash) {
                 // Our own earlier write (a retried commit): already done.
                 setBase(change.path, current, meta, change.stat);
@@ -450,7 +445,7 @@ export const makeEngine = (options: EngineOptions) =>
                 continue;
               }
               // Edited remotely while we deleted it: the edit wins, restore it.
-              const meta = yield* codec.openMeta(result.current.path, result.current.meta);
+              const meta = yield* decodeMeta(result.current.path, result.current.meta);
               const stat = yield* writeLocal(item.path, yield* download(result.current.chunks));
               setBase(item.path, result.current, meta, stat);
               log(`${item.path} was edited elsewhere; restored instead of deleting`);
@@ -510,17 +505,16 @@ export const makeEngine = (options: EngineOptions) =>
 
         const pending: Pending[] = [];
         for (const { from, change, base } of renames) {
-          const to = yield* codec.pathId(change.path);
           const op: Op = {
             op: "rename",
             from: base.pathId,
-            to,
+            to: change.path,
             baseVersion: base.version,
             // The server moves the stored content; an edit made with the move is pushed right after.
-            meta: yield* codec.sealMeta(to, { ...metaFor(change), hash: base.hash, size: base.size }),
+            meta: encodeMeta({ ...metaFor(change), hash: base.hash, size: base.size }),
             device: options.device,
           };
-          pending.push({ kind: "rename", from, change: { ...change, base: { ...base, pathId: to } }, base, op });
+          pending.push({ kind: "rename", from, change: { ...change, base: { ...base, pathId: change.path } }, base, op });
         }
         for (const path of missing) {
           const base = state.base[path]!;

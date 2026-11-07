@@ -32,9 +32,9 @@ export type ConfigCategory = keyof ConfigSyncSettings;
 /**
  * Category of a path inside the config dir, or null when it must never sync:
  * workspace layouts (per device), caches, and this plugin's own folder
- * (token, encryption key, sync state).
+ * (token, sync state).
  */
-/** Former ids of this plugin: their folders hold a token and key too, so never sync them. */
+/** Former ids of this plugin: their folders hold a token too, so never sync them. */
 const LEGACY_SELF_IDS = ["cloudflare-sync"];
 
 export const configCategory = (relative: string, selfPluginId: string): ConfigCategory | null => {

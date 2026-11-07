@@ -1,9 +1,8 @@
 /**
  * Wire contract between the Cloudflare server and the Obsidian plugin.
  *
- * The server only sees opaque values: `path` is a path id (an HMAC of the real
- * path once end-to-end encryption is on), `meta` is a sealed blob the client
- * understands, and `chunks` are content-addressed R2 keys (hashes of ciphertext).
+ * `path` is the file's vault path, `meta` is client JSON the server stores
+ * as is, and `chunks` are content-addressed R2 keys (SHA-256 of each chunk).
  *
  * Import Effect by module (never the `effect` barrel) so the plugin bundle
  * stays small. See docs/SCOPE.md.
@@ -32,7 +31,7 @@ export const Entry = Schema.Struct({
   deleted: Schema.Boolean,
   /** Content chunks (R2 keys), in order. Empty for tombstones. */
   chunks: Schema.Array(BlobHash),
-  /** Client-sealed metadata: real path, plaintext hash, size, mtime. */
+  /** Client metadata (JSON): path, content hash, size, mtime. */
   meta: Schema.String,
   device: Schema.String,
   createdAt: Schema.Number,
@@ -65,7 +64,7 @@ export const RenameOp = Schema.Struct({
   from: PathId,
   to: PathId,
   baseVersion: Version,
-  /** Sealed metadata for the new path (it is bound to the path id). */
+  /** Metadata for the new path (its `path` must match `to`). */
   meta: Schema.String,
   device: Schema.String,
 });
@@ -114,12 +113,9 @@ export type MovedFromResponse = typeof MovedFromResponse.Type;
 export const EntriesResponse = Schema.Struct({ entries: Schema.Array(Entry) });
 export type EntriesResponse = typeof EntriesResponse.Type;
 
-/** Vault-level settings stored once, e.g. key-derivation parameters (opaque JSON). */
+/** Vault-level settings stored once: the format, `{"format":"plain-v1"}` (opaque to the server). */
 export const VaultMetaResponse = Schema.Struct({ meta: Schema.NullOr(Schema.String), created: Schema.Boolean });
 export type VaultMetaResponse = typeof VaultMetaResponse.Type;
-
-export const ReplaceMetaResponse = Schema.Struct({ meta: Schema.NullOr(Schema.String), replaced: Schema.Boolean });
-export type ReplaceMetaResponse = typeof ReplaceMetaResponse.Type;
 
 export const PruneResponse = Schema.Struct({ prunedVersions: Schema.Int, deletedBlobs: Schema.Int });
 export type PruneResponse = typeof PruneResponse.Type;
@@ -131,7 +127,7 @@ export type ServerMessage = typeof ServerMessage.Type;
 // ---------------------------------------------------------------- routes
 
 export const CHUNK_SIZE = 8 * 1024 * 1024;
-/** Upper bound for a single blob request (a padded, encrypted chunk). */
+/** Upper bound for a single blob request (one chunk, with headroom). */
 export const MAX_BLOB_BYTES = CHUNK_SIZE + 64 * 1024;
 
 export const routes = {
@@ -141,7 +137,6 @@ export const routes = {
   deleted: (vault: string) => `/v1/vaults/${vault}/deleted`,
   movedFrom: (vault: string, path: string) => `/v1/vaults/${vault}/moved-from?path=${encodeURIComponent(path)}`,
   meta: (vault: string) => `/v1/vaults/${vault}/meta`,
-  replaceMeta: (vault: string) => `/v1/vaults/${vault}/meta/replace`,
   socket: (vault: string) => `/v1/vaults/${vault}/socket`,
   prune: (vault: string, days: number) => `/v1/vaults/${vault}/prune?days=${days}`,
   blob: (vault: string, hash: string) => `/v1/vaults/${vault}/blobs/${hash}`,

@@ -150,7 +150,7 @@ const main = async () => {
           break;
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
-          if (/does not support|encryption|Unauthorized|401|not a Homebase folder|No token/i.test(message)) throw error;
+          if (/doesn't support|Unauthorized|401|not a Homebase folder|No token/i.test(message)) throw error;
           log(`server not reachable (${message}); retrying in ${delay / 1000} s`);
           await new Promise((resolve) => setTimeout(resolve, delay));
         }

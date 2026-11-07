@@ -332,6 +332,23 @@ describe("engine: files this device can't write", () => {
     expect(server.store.current('Clippings/Farhan on X "Modal".md')?.deleted).toBe(false);
     expect(server.store.current("Clippings/Is it S3?.md")?.deleted).toBe(false);
   });
+
+  test("entries with bad metadata or unsafe paths are skipped; the rest syncs", async () => {
+    const { server, devices: [a] } = await setup(1);
+    a!.write("good.md", "ok");
+    await a!.sync();
+    const meta = (path: string) => JSON.stringify({ path, hash: "0".repeat(64), size: 0, mtime: 0 });
+    server.store.commit([
+      { op: "put", path: "mismatch.md", baseVersion: null, chunks: [], meta: meta("elsewhere.md"), device: "x" },
+      { op: "put", path: "../escape.md", baseVersion: null, chunks: [], meta: meta("../escape.md"), device: "x" },
+      { op: "put", path: "garbage.md", baseVersion: null, chunks: [], meta: "not json", device: "x" },
+    ]);
+
+    const { Device } = await import("./harness.ts");
+    const b = await new Device("b", server).start();
+    expect((await b.sync()).skipped).toBe(3);
+    expect(b.snapshot()).toEqual({ "good.md": "ok" });
+  });
 });
 
 describe("engine: moves", () => {

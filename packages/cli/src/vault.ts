@@ -12,8 +12,7 @@ import * as Layer from "effect/Layer";
 import { type Activity, type EngineOptions, makeEngine } from "../../plugin/src/core/engine.ts";
 import { fetchHttp, makeHttpRemote } from "../../plugin/src/core/http-remote.ts";
 import { mergeText } from "../../plugin/src/core/merge.ts";
-import { plainCodec } from "../../plugin/src/core/plain-codec.ts";
-import { Codec, LocalState, Remote, VaultIo } from "../../plugin/src/core/services.ts";
+import { LocalState, Remote, VaultIo } from "../../plugin/src/core/services.ts";
 import { fsLocalState, fsVaultIo, STATE_DIR, writeAtomic } from "./fs-vault.ts";
 import { loadIgnore } from "./ignore.ts";
 
@@ -150,7 +149,6 @@ export const openVault = async (root: string, overrides: Partial<EngineOptions> 
   const layer = Layer.mergeAll(
     Layer.succeed(VaultIo, io),
     Layer.succeed(Remote, remote),
-    Layer.succeed(Codec, plainCodec),
     Layer.succeed(LocalState, fsLocalState(root)),
   );
   const engine = await Effect.runPromise(
@@ -163,7 +161,7 @@ export const openVault = async (root: string, overrides: Partial<EngineOptions> 
       ...overrides,
     }).pipe(Effect.provide(layer)),
   );
-  const run = <A, E>(effect: Effect.Effect<A, E, VaultIo | Remote | Codec | LocalState>) =>
+  const run = <A, E>(effect: Effect.Effect<A, E, VaultIo | Remote | LocalState>) =>
     Effect.runPromise(effect.pipe(Effect.provide(layer)));
   return { config, token, remote, engine, run, io, isIgnored, reloadIgnore };
 };

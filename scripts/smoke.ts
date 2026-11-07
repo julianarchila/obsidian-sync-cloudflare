@@ -42,15 +42,15 @@ const created = await open();
 check("new vault is created (plain format)", created._tag === "Success" && created.success.created);
 const joined = await open();
 check("second device joins the same vault", joined._tag === "Success" && !joined.success.created);
-// A vault left by an older, end-to-end encrypted version is refused, not mixed.
-const legacyId = `${vaultId}-legacy`;
-await fetch(new URL(routes.meta(legacyId), serverUrl), {
+// A vault in another format (e.g. from the encrypted versions before 0.3) is refused, not mixed.
+const otherFormatId = `${vaultId}-legacy`;
+await fetch(new URL(routes.meta(otherFormatId), serverUrl), {
   method: "PUT",
   headers: { authorization: `Bearer ${token}` },
   body: JSON.stringify({ v: 1, salt: "x", iterations: 600000, wrapped: "y" }),
 });
-const legacy = await open(legacyId);
-check("a vault from the encrypted versions is refused", legacy._tag === "Failure" && legacy.failure._tag === "VaultFormatError");
+const otherFormat = await open(otherFormatId);
+check("a vault in another format is refused", otherFormat._tag === "Failure" && otherFormat.failure._tag === "VaultFormatError");
 if (created._tag !== "Success") process.exit(1);
 
 socket.send("ping");

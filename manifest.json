@@ -3,7 +3,7 @@
   "name": "Homebase",
   "version": "0.3.0",
   "minAppVersion": "1.7.2",
-  "description": "Self-hosted, end-to-end encrypted, real-time vault sync on your own Cloudflare account.",
+  "description": "Self-hosted, real-time vault sync on your own Cloudflare account, with agent access (MCP and CLI).",
   "author": "Julian Archila",
   "authorUrl": "https://github.com/julianarchila",
   "isDesktopOnly": false

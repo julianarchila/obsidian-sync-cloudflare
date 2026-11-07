@@ -17,7 +17,6 @@ const json = (body: unknown, status = 200) =>
 const decodeCommit = Schema.decodeUnknownSync(CommitRequest);
 const Hashes = Schema.Struct({ hashes: Schema.Array(Schema.String) });
 const decodeHashes = Schema.decodeUnknownSync(Hashes);
-const decodeReplace = Schema.decodeUnknownSync(Schema.Struct({ expected: Schema.String, next: Schema.String }));
 const decodeIndex = Schema.decodeUnknownSync(
   Schema.Struct({
     docs: Schema.Array(
@@ -106,12 +105,6 @@ export const handleVaultHttp = async (
         const body = await request.text();
         if (body.length === 0 || body.length > 16_384) return { response: json({ error: "bad meta" }, 400) };
         return { response: json(store.meta(body)) };
-      }
-
-      case "POST /meta/replace": {
-        const { expected, next } = decodeReplace(await request.json());
-        if (next.length === 0 || next.length > 16_384) return { response: json({ error: "bad meta" }, 400) };
-        return { response: json(store.replaceMeta(expected, next)) };
       }
 
       case "POST /prune": {

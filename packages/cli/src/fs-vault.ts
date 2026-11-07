@@ -15,7 +15,7 @@ import {
   VaultError,
   type VaultIoShape,
 } from "../../plugin/src/core/services.ts";
-import { isSafePath } from "../../plugin/src/core/plain-codec.ts";
+import { isSafePath } from "../../plugin/src/core/file-meta.ts";
 
 export const STATE_DIR = ".homebase";
 

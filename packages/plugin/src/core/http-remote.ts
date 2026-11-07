@@ -9,7 +9,6 @@ import {
   EntriesResponse,
   MovedFromResponse,
   type Op,
-  ReplaceMetaResponse,
   VaultMetaResponse,
   routes,
 } from "@oscf/protocol";
@@ -99,13 +98,6 @@ export const makeHttpRemote = ({ serverUrl, vaultId, token, http }: HttpRemoteOp
       init === undefined
         ? json(VaultMetaResponse, { method: "GET", url: url(routes.meta(vaultId)) })
         : json(VaultMetaResponse, { method: "PUT", url: url(routes.meta(vaultId)), body: init }),
-    replaceMeta: (expected, next) =>
-      json(ReplaceMetaResponse, {
-        method: "POST",
-        url: url(routes.replaceMeta(vaultId)),
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ expected, next }),
-      }),
     putBlob: (hash, data) =>
       send({
         method: "PUT",

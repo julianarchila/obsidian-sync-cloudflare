@@ -4,7 +4,7 @@
  * The Worker acts as one more device: it reads chunks from R2, uploads new
  * ones and commits through the Durable Object with the same compare-and-swap
  * as the plugin, so connected devices are notified and pull the change.
- * Requires the plain (unencrypted) vault format.
+ * Requires the `plain-v1` vault format.
  */
 import { CHUNK_SIZE, type Entry, type Op, type OpResult } from "@oscf/protocol";
 
@@ -80,7 +80,7 @@ export const makeVaultOps = (backend: VaultBackend, device: string) => {
       format = null;
     }
     if (format !== PLAIN_FORMAT)
-      throw new VaultOpsError("This vault uses end-to-end encryption, so the server cannot read it.");
+      throw new VaultOpsError("This vault isn't in the plain-v1 format (for example, it was created by an encrypted version before 0.3), so the server can't read it.");
   };
 
   /** Every live file (latest version per path). */
@@ -141,7 +141,7 @@ export const makeVaultOps = (backend: VaultBackend, device: string) => {
     return results[0]!;
   };
 
-  const sealMeta = (meta: FileMeta) => JSON.stringify(meta);
+  const encodeMeta = (meta: FileMeta) => JSON.stringify(meta);
 
   const toResult = (result: OpResult, index = 0): PutResult => {
     if (result.ok) return { ok: true, file: info(result.entries[index]!)! };
@@ -160,7 +160,7 @@ export const makeVaultOps = (backend: VaultBackend, device: string) => {
     }
     const meta = { path, hash: await sha256(bytes), size: bytes.byteLength, mtime: Date.now() };
     const result = toResult(
-      await commit({ op: "put", path, baseVersion, chunks, meta: sealMeta(meta), device }),
+      await commit({ op: "put", path, baseVersion, chunks, meta: encodeMeta(meta), device }),
     );
     if (result.ok) await indexNow(result.file, isIndexable(path) ? decode(bytes) : null);
     return result;
@@ -171,7 +171,7 @@ export const makeVaultOps = (backend: VaultBackend, device: string) => {
   const rename = async (from: FileInfo, to: string) => {
     const meta = { path: to, hash: from.hash, size: from.size, mtime: Date.now() };
     return toResult(
-      await commit({ op: "rename", from: from.path, to, baseVersion: from.entry.version, meta: sealMeta(meta), device }),
+      await commit({ op: "rename", from: from.path, to, baseVersion: from.entry.version, meta: encodeMeta(meta), device }),
       1,
     );
   };

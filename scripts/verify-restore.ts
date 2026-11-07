@@ -4,13 +4,6 @@
  *
  *   bun scripts/verify-restore.ts <vault-id> <local-dir>
  *
- * Vaults created by the older, end-to-end encrypted versions need the
- * password (or a device's data.json with a remembered key) to be read; use
- * this before migrating one to a plain vault (docs/MIGRATION.md):
- *
- *   bun scripts/verify-restore.ts <vault-id> <local-dir> <password-file>
- *   bun scripts/verify-restore.ts <vault-id> <local-dir> <vault>/.obsidian/plugins/homebase/data.json
- *
  * Only files the plugin syncs are compared (same rules: dotfiles skipped,
  * settings-sync categories, never the plugin's own folder or workspace files).
  */
@@ -19,41 +12,20 @@ import { join, relative } from "node:path";
 import * as Effect from "effect/Effect";
 
 import { DEFAULT_CONFIG_SYNC, makeIsConfigSyncable } from "../packages/plugin/src/core/config.ts";
-import { makeCryptoCodec } from "../packages/plugin/src/core/legacy/crypto-codec.ts";
 import { DEFAULT_SELECTIVE, makeIsSyncable } from "../packages/plugin/src/core/filter.ts";
 import { fetchHttp, makeHttpRemote } from "../packages/plugin/src/core/http-remote.ts";
-import { unlockVault } from "../packages/plugin/src/core/legacy/unlock.ts";
-import { plainCodec } from "../packages/plugin/src/core/plain-codec.ts";
 import { isPlainMeta } from "../packages/plugin/src/core/plain-vault.ts";
 import { Device } from "../packages/plugin/test/harness.ts";
 
-const [vaultId, dir, secretFile] = process.argv.slice(2);
-if (!vaultId || !dir) throw new Error("usage: verify-restore.ts <vault-id> <local-dir> [password-file | data.json]");
+const [vaultId, dir] = process.argv.slice(2);
+if (!vaultId || !dir) throw new Error("usage: verify-restore.ts <vault-id> <local-dir>");
 const serverUrl = process.env.OSCF_URL!;
 const token = process.env.OSCF_TOKEN!;
 const remote = makeHttpRemote({ serverUrl, vaultId, token, http: fetchHttp() });
 
 const { meta } = await Effect.runPromise(remote.meta());
 if (meta === null) throw new Error(`vault ${vaultId} does not exist`);
-
-const codec = await (async () => {
-  if (isPlainMeta(meta)) return plainCodec;
-  if (!secretFile) throw new Error("this vault is end-to-end encrypted: pass a password file or a device's data.json");
-  // Either a file holding the vault password, or a device's plugin data.json with a remembered key.
-  const secret = await readFile(secretFile, "utf8");
-  const remembered = (() => {
-    try {
-      const key = (JSON.parse(secret) as { key?: string }).key;
-      return key ? Uint8Array.from(Buffer.from(key, "base64")) : undefined;
-    } catch {
-      return undefined;
-    }
-  })();
-  const password = remembered ? undefined : secret.replace(/\n$/, "");
-  const unlocked = await Effect.runPromise(unlockVault(remote, { password, rememberedKey: remembered }).pipe(Effect.result));
-  if (unlocked._tag === "Failure") throw new Error(`unlock failed: ${JSON.stringify(unlocked.failure)}`);
-  return Effect.runPromise(makeCryptoCodec(unlocked.success.master));
-})();
+if (!isPlainMeta(meta)) throw new Error(`vault ${vaultId} is not a plain-v1 vault`);
 
 const configDir = ".obsidian";
 const notes = makeIsSyncable(DEFAULT_SELECTIVE, [`${configDir}/plugins/homebase`]);
@@ -62,7 +34,7 @@ const isSyncable = (p: string) =>
   p.startsWith(`${configDir}/`) ? config(p) : !p.split("/").some((part) => part.startsWith(".")) && notes(p);
 
 const t0 = Date.now();
-const device = await new Device("restore-drill", remote, { isSyncable }, codec).start();
+const device = await new Device("restore-drill", remote, { isSyncable }).start();
 await device.sync();
 // Compare names the way Obsidian reports them: macOS may store NFD while Obsidian
 // uses NFC, and Obsidian exposes U+202F (macOS screenshot names) as a plain space.
