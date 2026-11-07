@@ -102,9 +102,11 @@ export class VaultStore {
       .map((r) => r.path);
   }
 
-  /** Newest versions first (every version, not just heads), optionally only after `since`. */
-  recent(limit: number, since = 0): Entry[] {
-    return this.sql.all<Row>(`${SELECT} WHERE v.seq > ? ORDER BY v.seq DESC LIMIT ?`, since, limit).map(toEntry);
+  /** Versions after `since` (every version, not just heads): the newest `limit`, or with `oldestFirst` the next `limit`. */
+  recent(limit: number, since = 0, oldestFirst = false): Entry[] {
+    return this.sql
+      .all<Row>(`${SELECT} WHERE v.seq > ? ORDER BY v.seq ${oldestFirst ? "ASC" : "DESC"} LIMIT ?`, since, limit)
+      .map(toEntry);
   }
 
   deleted(): Entry[] {

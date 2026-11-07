@@ -25,6 +25,7 @@ const decodeIndex = Schema.decodeUnknownSync(
         seq: Schema.Int,
         path: Schema.NullOr(Schema.String),
         text: Schema.NullOr(Schema.String),
+        links: Schema.optionalKey(Schema.Array(Schema.String)),
       }),
     ),
   }),
@@ -68,7 +69,7 @@ export const handleVaultHttp = async (
       }
 
       case "GET /recent":
-        return { response: json({ entries: store.recent(Math.min(int("limit", 50), 500), int("since", 0)) }) };
+        return { response: json({ entries: store.recent(Math.min(int("limit", 50), 500), int("since", 0), url.searchParams.get("order") === "asc") }) };
 
       // Search index (used by the Worker's MCP endpoint, never by devices).
       case "GET /index/pending":
@@ -88,6 +89,10 @@ export const handleVaultHttp = async (
             backlog: index.backlog(),
           }),
         };
+
+      case "GET /linking":
+        if (!index) break;
+        return { response: json({ paths: index.linking(url.searchParams.getAll("key")), backlog: index.backlog() }) };
 
       case "GET /moved-from": {
         const path = url.searchParams.get("path");

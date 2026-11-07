@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { hasLinkTo, rebaseLinks, rewriteLinks } from "../src/core/links.ts";
+import { hasLinkTo, linkKeys, linkKeysOf, rebaseLinks, rewriteLinks } from "../src/core/links.ts";
 
 describe("links", () => {
   const from = "Projects/idea.md";
@@ -50,5 +50,27 @@ describe("links", () => {
   test("hasLinkTo finds relative Markdown links", () => {
     expect(hasLinkTo("see [it](../Projects/idea.md#x)", from, "Notes/n.md")).toBe(true);
     expect(hasLinkTo("see `[[idea]]`", from, "Notes/n.md")).toBe(false);
+  });
+});
+
+describe("links: names several notes share", () => {
+  const paths = ["Work/Plan.md", "Personal/Plan.md", "Personal/Todo.md", "Other/Index.md"];
+
+  test("a bare name resolves to the note next to the linking note", () => {
+    expect(rewriteLinks("[[Plan]]", "Work/Plan.md", "Work/Roadmap.md", "Personal/Todo.md", paths).count).toBe(0);
+    expect(rewriteLinks("[[Plan]]", "Personal/Plan.md", "Personal/Roadmap.md", "Personal/Todo.md", paths).text).toBe("[[Roadmap]]");
+    // Ambiguous from elsewhere: left alone; a path link is always exact.
+    expect(rewriteLinks("[[Plan]] [[Work/Plan]]", "Work/Plan.md", "Work/Roadmap.md", "Other/Index.md", paths).text).toBe(
+      "[[Plan]] [[Work/Roadmap]]",
+    );
+  });
+
+  test("linkKeys covers every link hasLinkTo can match", () => {
+    const text = "[[Plan#x|y]] [a](../Work/Plan.md) [b](<My Note.md>) [c](My%20Note.md) `[[code]]` [w](https://x.y)";
+    expect(linkKeys(text, "Notes/n.md").sort()).toEqual(["my note", "notes/my note", "plan", "work/plan"]);
+    for (const path of ["Work/Plan.md", "Notes/My Note.md"]) {
+      expect(hasLinkTo(text, path, "Notes/n.md")).toBe(true);
+      expect(linkKeysOf(path).some((k) => linkKeys(text, "Notes/n.md").includes(k))).toBe(true);
+    }
   });
 });

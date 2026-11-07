@@ -173,11 +173,22 @@ export const makeEngine = (options: EngineOptions) =>
     const removeLocal = (path: string) =>
       vault.remove(path).pipe(Effect.tap(() => Effect.sync(() => options.onLocalWrite?.(path))));
 
+    /** Synced paths by content hash, built once per pull (entries are checked on read, so staleness is harmless). */
+    let byHash: Map<string, string[]> | undefined;
+
     /** Bytes for `hash` already on this device (an unchanged synced file), to avoid downloading them again. */
     const localCopy = (hash: string, exclude: string) =>
       Effect.gen(function* () {
-        for (const [path, base] of Object.entries(state.base)) {
-          if (path === exclude || base.hash !== hash) continue;
+        if (byHash === undefined) {
+          byHash = new Map();
+          for (const [path, base] of Object.entries(state.base)) {
+            const paths = byHash.get(base.hash);
+            if (paths) paths.push(path);
+            else byHash.set(base.hash, [path]);
+          }
+        }
+        for (const path of byHash.get(hash) ?? []) {
+          if (path === exclude) continue;
           const local = yield* readLocal(path);
           if (local !== null && local.hash === hash) return local.bytes;
         }
@@ -285,6 +296,7 @@ export const makeEngine = (options: EngineOptions) =>
      */
     const pull = (report: SyncReport, takeDirty?: () => ReadonlySet<string>) =>
       Effect.gen(function* () {
+        byHash = undefined;
         for (;;) {
           const page = yield* remote.changes(state.cursor);
           const work: Array<{ entry: Entry; meta: FileMeta; size: number; small: boolean }> = [];
@@ -489,12 +501,19 @@ export const makeEngine = (options: EngineOptions) =>
           changed = changed.filter((c) => c !== change);
         }
 
-        // Moved and edited in one go (e.g. links rewritten while moving): same file name in
-        // another folder, and only one candidate on each side.
+        // Moved and edited in one go (e.g. links rewritten while moving): a note with the same
+        // file name in another folder and a similar size, and only one candidate on each side.
+        // Notes only: settings files (plugins/X/main.js → plugins/Y/main.js) share names
+        // without being the same file.
+        const isNote = (path: string) => /\.md$/i.test(path) && !path.split("/").some((part) => part.startsWith("."));
         for (const from of [...missing]) {
+          if (!isNote(from)) continue;
           const base = state.base[from]!;
           const name = from.slice(from.lastIndexOf("/") + 1);
-          const matches = changed.filter((c) => c.base === undefined && c.path.slice(c.path.lastIndexOf("/") + 1) === name);
+          const similar = (size: number) => Math.abs(size - base.size) <= Math.max(1024, base.size / 2);
+          const matches = changed.filter(
+            (c) => c.base === undefined && c.path.slice(c.path.lastIndexOf("/") + 1) === name && similar(c.stat.size),
+          );
           const sameName = missing.filter((p) => p.slice(p.lastIndexOf("/") + 1) === name);
           if (matches.length !== 1 || sameName.length !== 1) continue;
           const change = matches[0]!;

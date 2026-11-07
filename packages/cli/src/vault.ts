@@ -14,7 +14,7 @@ import { fetchHttp, makeHttpRemote } from "../../plugin/src/core/http-remote.ts"
 import { mergeText } from "../../plugin/src/core/merge.ts";
 import { LocalState, Remote, VaultIo } from "../../plugin/src/core/services.ts";
 import { fsLocalState, fsVaultIo, STATE_DIR, writeAtomic } from "./fs-vault.ts";
-import { loadIgnore } from "./ignore.ts";
+import { IGNORE_FILE, loadIgnore } from "./ignore.ts";
 
 export interface Config {
   readonly url: string;
@@ -141,9 +141,6 @@ export const openVault = async (root: string, overrides: Partial<EngineOptions> 
   // Reloadable: `watch` picks up edits to .homebaseignore without a restart.
   let ignoreRules = await loadIgnore(root);
   const isIgnored = (path: string) => ignoreRules(path);
-  const reloadIgnore = async () => {
-    ignoreRules = await loadIgnore(root);
-  };
   const io = fsVaultIo(root, isIgnored);
   const remote = makeHttpRemote({ serverUrl: config.url, vaultId: config.vault, token, http: fetchHttp() });
   const layer = Layer.mergeAll(
@@ -163,5 +160,21 @@ export const openVault = async (root: string, overrides: Partial<EngineOptions> 
   );
   const run = <A, E>(effect: Effect.Effect<A, E, VaultIo | Remote | LocalState>) =>
     Effect.runPromise(effect.pipe(Effect.provide(layer)));
+
+  // When .homebaseignore changes, paths it no longer ignores may hold remote files the
+  // cursor already went past: re-read the whole index (like the plugin's selective sync).
+  const fingerprintFile = nodePath.join(root, STATE_DIR, "ignore-fingerprint");
+  const checkIgnoreChange = async () => {
+    const current = await fs.readFile(nodePath.join(root, IGNORE_FILE), "utf8").catch(() => "");
+    const stored = await fs.readFile(fingerprintFile, "utf8").catch(() => null);
+    if (stored === current) return;
+    if (stored !== null) await Effect.runPromise(engine.resetCursor);
+    await writeAtomic(fingerprintFile, current);
+  };
+  await checkIgnoreChange();
+  const reloadIgnore = async () => {
+    ignoreRules = await loadIgnore(root);
+    await checkIgnoreChange();
+  };
   return { config, token, remote, engine, run, io, isIgnored, reloadIgnore };
 };

@@ -8,7 +8,9 @@
  */
 import { CHUNK_SIZE, type Entry, type Op, type OpResult } from "@oscf/protocol";
 
-export const PLAIN_FORMAT = "plain-v1";
+import { isSafePath } from "../../plugin/src/core/file-meta.ts";
+import { linkKeys } from "../../plugin/src/core/links.ts";
+import { isPlainMeta } from "../../plugin/src/core/plain-vault.ts";
 
 export interface FileMeta {
   readonly path: string;
@@ -46,19 +48,29 @@ export const sha256 = async (bytes: Uint8Array) =>
 export const encode = (text: string) => new TextEncoder().encode(text);
 export const decode = (bytes: Uint8Array) => new TextDecoder().decode(bytes);
 
-export const parseMeta = (meta: string): FileMeta | null => {
+/** An entry's metadata, or null if it is invalid or doesn't match its path (devices skip those too). */
+const parseMeta = (path: string, meta: string): FileMeta | null => {
   try {
     const parsed = JSON.parse(meta) as Partial<FileMeta>;
-    return typeof parsed.path === "string" ? (parsed as FileMeta) : null;
+    return parsed.path === path && isSafePath(path) ? (parsed as FileMeta) : null;
   } catch {
     return null;
   }
 };
 
 const info = (entry: Entry): FileInfo | null => {
-  const meta = parseMeta(entry.meta);
+  const meta = parseMeta(entry.path, entry.meta);
   return meta ? { ...meta, entry } : null;
 };
+
+/** What the index stores for a note: its text and, for Markdown, its link keys. */
+const indexDoc = (pathId: string, seq: number, path: string, body: string | null) => ({
+  pathId,
+  seq,
+  path: body === null ? null : path,
+  text: body,
+  ...(body !== null && /\.md$/i.test(path) ? { links: linkKeys(body, path) } : {}),
+});
 
 export type PutResult = { ok: true; file: FileInfo } | { ok: false; current: FileInfo | null };
 
@@ -73,13 +85,7 @@ export const makeVaultOps = (backend: VaultBackend, device: string) => {
   const ensurePlain = async () => {
     const { meta } = await json<{ meta: string | null }>("/meta");
     if (meta === null) throw new VaultNotFound("This vault does not exist yet. Check the vault id in the MCP URL (it must match your devices).");
-    let format: unknown;
-    try {
-      format = (JSON.parse(meta) as { format?: unknown }).format;
-    } catch {
-      format = null;
-    }
-    if (format !== PLAIN_FORMAT)
+    if (!isPlainMeta(meta))
       throw new VaultOpsError("This vault isn't in the plain-v1 format (for example, it was created by an encrypted version before 0.3), so the server can't read it.");
   };
 
@@ -162,7 +168,8 @@ export const makeVaultOps = (backend: VaultBackend, device: string) => {
     const result = toResult(
       await commit({ op: "put", path, baseVersion, chunks, meta: encodeMeta(meta), device }),
     );
-    if (result.ok) await indexNow(result.file, isIndexable(path) ? decode(bytes) : null);
+    // The write landed; a failed index update is caught up by the next search.
+    if (result.ok) await indexNow(result.file, isIndexable(path) ? decode(bytes) : null).catch(() => {});
     return result;
   };
 
@@ -179,8 +186,8 @@ export const makeVaultOps = (backend: VaultBackend, device: string) => {
   const movedFrom = async (path: string) =>
     (await json<{ paths: string[] }>(`/moved-from?path=${encodeURIComponent(path)}`)).paths;
 
-  const recent = async (limit: number, since = 0) => {
-    const { entries } = await json<{ entries: Entry[] }>(`/recent?limit=${limit}&since=${since}`);
+  const recent = async (limit: number, since = 0, oldestFirst = false) => {
+    const { entries } = await json<{ entries: Entry[] }>(`/recent?limit=${limit}&since=${since}${oldestFirst ? "&order=asc" : ""}`);
     return entries.map(info).filter((f): f is FileInfo => f !== null);
   };
 
@@ -196,7 +203,7 @@ export const makeVaultOps = (backend: VaultBackend, device: string) => {
   const indexNow = async (file: FileInfo, body: string | null) => {
     await json("/index", {
       method: "POST",
-      body: JSON.stringify({ docs: [{ pathId: file.entry.path, seq: file.entry.seq, path: file.path, text: body }] }),
+      body: JSON.stringify({ docs: [indexDoc(file.entry.path, file.entry.seq, file.path, body)] }),
     });
   };
 
@@ -211,9 +218,9 @@ export const makeVaultOps = (backend: VaultBackend, device: string) => {
       if (docs.length === 0 || left <= 0) return backlog;
       // Sequential (Worker subrequest and memory limits); a broken document is
       // indexed as empty instead of blocking every later search.
-      const indexed: Array<{ pathId: string; seq: number; path: string | null; text: string | null }> = [];
+      const indexed: Array<ReturnType<typeof indexDoc>> = [];
       for (const doc of docs) {
-        const meta = parseMeta(doc.meta);
+        const meta = parseMeta(doc.pathId, doc.meta);
         let body: string | null = null;
         if (!doc.deleted && meta && isIndexable(meta.path) && meta.size <= MAX_INDEX_BYTES) {
           try {
@@ -222,13 +229,17 @@ export const makeVaultOps = (backend: VaultBackend, device: string) => {
             body = null;
           }
         }
-        indexed.push({ pathId: doc.pathId, seq: doc.seq, path: body === null ? null : meta!.path, text: body });
+        indexed.push(indexDoc(doc.pathId, doc.seq, doc.pathId, body));
       }
       const result = await json<{ backlog: number }>("/index", { method: "POST", body: JSON.stringify({ docs: indexed }) });
       left -= docs.length;
       if (result.backlog === 0) return 0;
     }
   };
+
+  /** Indexed notes with a link whose key is one of `keys`. */
+  const linking = async (keys: ReadonlyArray<string>) =>
+    json<{ paths: string[]; backlog: number }>(`/linking?${keys.map((k) => `key=${encodeURIComponent(k)}`).join("&")}`);
 
   const search = async (query: string, limit: number) =>
     json<{ hits: Array<{ path: string; snippet: string }>; backlog: number }>(
@@ -251,6 +262,7 @@ export const makeVaultOps = (backend: VaultBackend, device: string) => {
     deleted,
     catchUpIndex,
     search,
+    linking,
   };
 };
 

@@ -212,6 +212,28 @@ check("note_history follows the move", movedHistory.text.includes("Meetings/Kick
 check("moves are not listed as deleted", !(await call("list_deleted")).text.includes("Meetings/Kickoff.md"));
 const recentMove = await call("recent_changes", { limit: 5 });
 check("recent_changes shows a move once", recentMove.text.includes("moved\tMeetings/Kickoff.md → Archive/Kickoff 2026.md"), recentMove.text);
+
+// Paging forward with `since` never skips a change.
+const seqs = (text: string) => [...text.matchAll(/^seq (\d+)/gm)].map((m) => Number(m[1]));
+const firstPage = await call("recent_changes", { since: 0, limit: 3 });
+const next = Number(/since=(\d+)/.exec(firstPage.text)?.[1]);
+const secondPage = await call("recent_changes", { since: next, limit: 3 });
+check(
+  "recent_changes with since pages forward, oldest first, without gaps",
+  seqs(firstPage.text).length === 3 && seqs(firstPage.text).every((n, i, a) => i === 0 || n > a[i - 1]!) && seqs(secondPage.text)[0]! > next,
+  `${firstPage.text}\n---\n${secondPage.text}`,
+);
+if (workToken) {
+  await call("create_note", { path: "Private/secret-plan.md", content: "x\n" });
+  await call("move_note", { from: "Private/secret-plan.md", to: "Work/plan-from-private.md" });
+  const scopedHistory = await call("note_history", { path: "Work/plan-from-private.md" }, workToken);
+  const scopedRecent = await call("recent_changes", { limit: 50 }, workToken);
+  check(
+    "a folder-scoped client doesn't see paths outside its folders",
+    !scopedHistory.isError && !scopedHistory.text.includes("Private/") && !scopedRecent.text.includes("Private/"),
+    `${scopedHistory.text}\n---\n${scopedRecent.text}`,
+  );
+}
 const back = await call("find_backlinks", { path: "Archive/Kickoff 2026.md" });
 check("find_backlinks lists the linking note", back.text.includes("Projects/Links.md"), back.text);
 

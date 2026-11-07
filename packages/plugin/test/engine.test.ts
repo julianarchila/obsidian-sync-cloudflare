@@ -368,6 +368,21 @@ describe("engine: moves", () => {
     expect(server.store.deleted().length).toBe(0);
   });
 
+  test("same file name elsewhere is not a move for settings files or a different note", async () => {
+    const { server, devices: [a] } = await setup(1);
+    a!.write(".obsidian/plugins/x/main.js", "x plugin");
+    a!.write("Old/README.md", "short");
+    await a!.sync();
+    a!.remove(".obsidian/plugins/x/main.js");
+    a!.write(".obsidian/plugins/y/main.js", "y plugin, different");
+    a!.remove("Old/README.md");
+    a!.write("New/README.md", "a much longer, unrelated note\n".repeat(200));
+    await a!.sync();
+    expect(server.store.movedFrom(".obsidian/plugins/y/main.js")).toEqual([]);
+    expect(server.store.movedFrom("New/README.md")).toEqual([]);
+    expect(server.store.deleted().map((e) => e.path).sort()).toEqual([".obsidian/plugins/x/main.js", "Old/README.md"]);
+  });
+
   test("moved offline while edited elsewhere: the edit lands at the new path, no duplicate", async () => {
     const { devices: [a, b] } = await setup();
     a!.write("Trip.md", "draft\n");

@@ -13,13 +13,23 @@ export const WIKILINK = /(!?\[\[)([^\]|#\n]+)((?:#[^\]|\n]*)?(?:\|[^\]\n]*)?\]\]
 const MDLINK = /(!?\[[^\]\n]*\]\()(<[^>\n]+>|[^)\s]+)((?:\s+"[^"\n]*")?\))/g;
 const CODE = /(```[\s\S]*?```|~~~[\s\S]*?~~~|`[^`\n]*`)/;
 
-/** Does `target` (a wikilink target) point at `path`? By full path or, Obsidian's default, by note name. */
-export const linksTo = (target: string, path: string) => {
-  const t = stem(target.trim()).normalize("NFC").toLowerCase();
-  return t === stem(path).toLowerCase() || t === baseName(path).toLowerCase();
-};
-
 const dirOf = (path: string) => (path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "");
+const wikiKey = (target: string) => stem(target.trim()).normalize("NFC").toLowerCase();
+
+/**
+ * Does `target` (a wikilink target in `note`) point at `path`? By full path or,
+ * Obsidian's default, by note name. With `paths` (every file in the vault), a
+ * name several files share counts only when `path` is the one next to `note`,
+ * the way Obsidian resolves it; otherwise it is left alone.
+ */
+export const linksTo = (target: string, path: string, note = "", paths?: ReadonlyArray<string>) => {
+  const t = wikiKey(target);
+  if (t === stem(path).toLowerCase()) return true;
+  if (t !== baseName(path).toLowerCase()) return false;
+  const named = paths?.filter((p) => baseName(p).toLowerCase() === t) ?? [];
+  if (named.length <= 1) return true;
+  return named.find((p) => dirOf(p) === dirOf(note)) === path;
+};
 
 /** Resolve `rel` against folder `dir` (vault paths, forward slashes). Null if it leaves the vault. */
 const resolve = (dir: string, rel: string) => {
@@ -91,12 +101,12 @@ const outsideCode = (text: string, f: (part: string) => string) =>
  * Rewrite links in `text` (the content of note `note`) that point at `from`
  * so they point at `to`.
  */
-export const rewriteLinks = (text: string, from: string, to: string, note = "") => {
+export const rewriteLinks = (text: string, from: string, to: string, note = "", paths?: ReadonlyArray<string>) => {
   let count = 0;
   const out = outsideCode(text, (part) =>
     part
       .replace(WIKILINK, (all, open: string, target: string, rest: string) => {
-        if (!linksTo(target, from)) return all;
+        if (!linksTo(target, from, note, paths)) return all;
         const byPath = target.includes("/");
         const replacement = byPath ? stem(to) : baseName(to);
         if (replacement === stem(target.trim())) return all;
@@ -132,12 +142,31 @@ export const rebaseLinks = (text: string, from: string, to: string) => {
 };
 
 /** Does `text` (the content of `note`) link to `path`? */
-export const hasLinkTo = (text: string, path: string, note = "") => {
+export const hasLinkTo = (text: string, path: string, note = "", paths?: ReadonlyArray<string>) => {
   let found = false;
   outsideCode(text, (part) => {
-    if ([...part.matchAll(WIKILINK)].some((m) => linksTo(m[2]!, path))) found = true;
+    if ([...part.matchAll(WIKILINK)].some((m) => linksTo(m[2]!, path, note, paths))) found = true;
     if ([...part.matchAll(MDLINK)].some((m) => parseMd(m[2]!, note).some((t) => t.path === path))) found = true;
     return part;
   });
   return found;
 };
+
+/**
+ * Lookup keys for every link in `text` (the content of `note`): wikilink
+ * targets and the paths Markdown links can resolve to, lowercased without
+ * `.md`. A note links to `path` only if one of its keys is `linkKeysOf(path)`,
+ * so an index of keys finds every candidate backlink.
+ */
+export const linkKeys = (text: string, note: string) => {
+  const keys = new Set<string>();
+  outsideCode(text, (part) => {
+    for (const m of part.matchAll(WIKILINK)) keys.add(wikiKey(m[2]!));
+    for (const m of part.matchAll(MDLINK)) for (const t of parseMd(m[2]!, note)) keys.add(stem(t.path).toLowerCase());
+    return part;
+  });
+  return [...keys];
+};
+
+/** The keys a link to `path` can have: its full path or its name. */
+export const linkKeysOf = (path: string) => [...new Set([stem(path).toLowerCase(), baseName(path).toLowerCase()])];

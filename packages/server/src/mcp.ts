@@ -19,7 +19,7 @@ import * as HttpRouter from "effect/http/HttpRouter";
 import * as HttpServer from "effect/http/HttpServer";
 import * as Layer from "effect/Layer";
 
-import { baseName, hasLinkTo, rebaseLinks, rewriteLinks } from "../../plugin/src/core/links.ts";
+import { baseName, hasLinkTo, linkKeysOf, rebaseLinks, rewriteLinks } from "../../plugin/src/core/links.ts";
 import { diffLines, merge3 } from "../../plugin/src/core/merge.ts";
 import { encode, type FileInfo, isTextPath, type VaultOps } from "./vault-ops.ts";
 
@@ -255,27 +255,33 @@ const page = (label: string, text: string, offsetArg: number | undefined, limitA
 
 // ---------------------------------------------------------------- links
 
-/** Notes that link to `path`, found through the search index and checked in their content. */
+/**
+ * Notes that link to `path`: candidates from the index of link keys, checked
+ * in their content. `paths` (every file) resolves names several files share.
+ * Refuses while the index is behind, so a move never misses a linking note.
+ */
 const backlinks = async (ops: VaultOps, client: McpClient, path: string) => {
-  await ops.catchUpIndex(100);
-  const { hits } = await ops.search(baseName(path), 200);
-  const out: Array<{ file: FileInfo; text: string }> = [];
-  for (const hit of hits) {
-    if (hit.path === path || !allowed(client, hit.path)) continue;
-    const file = await ops.current(hit.path);
+  const backlog = await ops.catchUpIndex(100);
+  if (backlog > 0) throw new ToolError(`Indexing the vault's links: ${backlog} file(s) left. Call again in a moment.`);
+  const { paths: candidates } = await ops.linking(linkKeysOf(path));
+  const paths = candidates.length > 0 ? (await ops.files()).map((f) => f.path) : [];
+  const found: Array<{ file: FileInfo; text: string }> = [];
+  for (const candidate of candidates) {
+    if (candidate === path || !allowed(client, candidate)) continue;
+    const file = await ops.current(candidate);
     if (!file) continue;
     const text = await ops.text(file);
-    if (hasLinkTo(text, path, file.path)) out.push({ file, text });
+    if (hasLinkTo(text, path, file.path, paths)) found.push({ file, text });
   }
-  return out;
+  return { found, paths };
 };
 
-/** Every version of a path including the paths it was moved from, newest first. */
-const fullHistory = async (ops: VaultOps, path: string) => {
+/** Every version of a path including the paths it was moved from (within the client's folders), newest first. */
+const fullHistory = async (ops: VaultOps, client: McpClient, path: string) => {
   const out: FileInfo[] = [];
   const seen = new Set<string>();
   let current: string | undefined = path;
-  while (current !== undefined && !seen.has(current) && seen.size < 20) {
+  while (current !== undefined && allowed(client, current) && !seen.has(current) && seen.size < 20) {
     seen.add(current);
     out.push(...(await ops.history(current)));
     current = (await ops.movedFrom(current))[0];
@@ -283,9 +289,12 @@ const fullHistory = async (ops: VaultOps, path: string) => {
   return out;
 };
 
-const describeVersion = (f: FileInfo) =>
+/** A move's destination, hidden when it is outside the client's folders. */
+const movedTo = (client: McpClient, to: string) => (allowed(client, to) ? to : "a path outside your folders");
+
+const describeVersion = (client: McpClient) => (f: FileInfo) =>
   `${f.path} v${f.entry.version}\t${when(f.entry.createdAt)}\t${
-    f.entry.movedTo ? `moved to ${f.entry.movedTo}` : f.entry.deleted ? "deleted" : size(f.size)
+    f.entry.movedTo ? `moved to ${movedTo(client, f.entry.movedTo)}` : f.entry.deleted ? "deleted" : size(f.size)
   }\tby ${f.entry.device}`;
 
 const findVersion = async (ops: VaultOps, path: string, version: number | undefined) => {
@@ -446,13 +455,13 @@ const tools: ToolDef[] = [
     run: async (args, { ops, client }) => {
       const path = normalizePath(str(args, "path"));
       checkAllowed(client, path);
-      const found = await backlinks(ops, client, path);
+      const { found, paths } = await backlinks(ops, client, path);
       if (found.length === 0) return { text: `No notes link to ${path}.` };
       return {
         text: found
           .map(({ file, text }) => {
             const lines = text.split("\n").filter((line) => line.includes("[[") || line.includes("]("));
-            const hits = lines.filter((line) => hasLinkTo(line, path, file.path));
+            const hits = lines.filter((line) => hasLinkTo(line, path, file.path, paths));
             return `${file.path}\n${hits.slice(0, 3).map((l) => `  ${l.trim()}`).join("\n")}`;
           })
           .join("\n"),
@@ -463,30 +472,38 @@ const tools: ToolDef[] = [
     name: "recent_changes",
     title: "Recent changes",
     description:
-      "What changed in the vault, newest first: created, edited, moved and deleted files, and which device or connection made each change. Times are UTC. Use `since` (a seq from a previous call) to get only newer changes.",
+      "What changed in the vault: created, edited, moved and deleted files, and which device or connection made each change. Times are UTC. Without `since`, the latest changes, newest first. With `since` (a seq from a previous call), the changes after it, oldest first; page on with the `since` the reply suggests.",
     properties: {
       limit: { type: "integer", description: "Maximum changes (default 30)." },
       since: { type: "integer", description: "Only changes after this seq." },
     },
     run: async (args, { ops, client }) => {
       const limit = Math.min(optInt(args, "limit") ?? 30, 200);
-      const scoped = client.folders.length > 0;
-      const all = await ops.recent(scoped ? 500 : limit + 50, optInt(args, "since") ?? 0);
+      const since = optInt(args, "since");
+      const fetched = client.folders.length > 0 ? 500 : limit + 50;
+      // With `since`: oldest first, so paging forward never skips a change.
+      const all = await ops.recent(fetched, since ?? 0, since !== undefined);
+      const visible = (f: FileInfo) => allowed(client, f.path) && !isConfig(f.path);
       // A rename is stored as a tombstone (movedTo) plus the new path: show it once.
-      const arrivals = new Set(all.filter((f) => f.entry.movedTo).map((f) => `${f.entry.movedTo}@${f.entry.seq + 1}`));
-      const changes = all
-        .filter((f) => !arrivals.has(`${f.path}@${f.entry.seq}`) && allowed(client, f.path) && !isConfig(f.path))
-        .slice(0, limit);
+      const arrivals = new Set(all.filter((f) => f.entry.movedTo && visible(f)).map((f) => `${f.entry.movedTo}@${f.entry.seq + 1}`));
+      const shown = all.filter((f) => !arrivals.has(`${f.path}@${f.entry.seq}`) && visible(f));
+      const changes = shown.slice(0, limit);
+      const next =
+        since === undefined
+          ? undefined
+          : shown.length > limit
+            ? changes.at(-1)!.entry.seq
+            : all.length === fetched
+              ? all.at(-1)!.entry.seq
+              : undefined;
+      const lines = changes.map(
+        (f) =>
+          `seq ${f.entry.seq}\t${when(f.entry.createdAt)}\t${kindOf(f)}\t${f.path}${f.entry.movedTo ? ` → ${movedTo(client, f.entry.movedTo)}` : ""}\tv${f.entry.version}\tby ${f.entry.device}`,
+      );
       return {
         text:
-          changes.length === 0
-            ? "No changes."
-            : changes
-                .map(
-                  (f) =>
-                    `seq ${f.entry.seq}\t${when(f.entry.createdAt)}\t${kindOf(f)}\t${f.path}${f.entry.movedTo ? ` → ${f.entry.movedTo}` : ""}\tv${f.entry.version}\tby ${f.entry.device}`,
-                )
-                .join("\n"),
+          (lines.length === 0 ? "No changes." : lines.join("\n")) +
+          (next !== undefined ? `\n\n[More changes: call again with since=${next}]` : ""),
       };
     },
   },
@@ -623,7 +640,8 @@ const tools: ToolDef[] = [
       checkAllowed(client, to);
       const file = await ops.current(from);
       if (!file) throw await notFound(ops, client, from);
-      const linking = args.update_links === false || !/\.md$/i.test(from) ? [] : await backlinks(ops, client, from);
+      const { found: linking, paths } =
+        args.update_links === false || !/\.md$/i.test(from) ? { found: [], paths: [] } : await backlinks(ops, client, from);
       const result = await ops.rename(file, to);
       if (!result.ok)
         throw new ToolError(result.current?.path === to ? `${to} already exists.` : `${from} changed meanwhile; try again.`);
@@ -647,7 +665,7 @@ const tools: ToolDef[] = [
         try {
           let count = 0;
           await saveText(ops, other.path, (text) => {
-            const rewritten = rewriteLinks(text ?? "", from, to, other.path);
+            const rewritten = rewriteLinks(text ?? "", from, to, other.path, paths);
             count = rewritten.count;
             return rewritten.text;
           });
@@ -689,9 +707,9 @@ const tools: ToolDef[] = [
     run: async (args, { ops, client }) => {
       const path = normalizePath(str(args, "path"));
       checkAllowed(client, path);
-      const versions = await fullHistory(ops, path);
+      const versions = await fullHistory(ops, client, path);
       if (versions.length === 0) throw await notFound(ops, client, path);
-      return { text: versions.map(describeVersion).join("\n") };
+      return { text: versions.map(describeVersion(client)).join("\n") };
     },
   },
   {
