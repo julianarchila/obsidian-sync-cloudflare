@@ -253,8 +253,18 @@ export const makeEngine = (options: EngineOptions) =>
           const page = yield* remote.changes(state.cursor);
           const work: Array<{ entry: Entry; meta: FileMeta; size: number; small: boolean }> = [];
           for (const entry of page.entries) {
-            const meta = yield* codec.openMeta(entry.path, entry.meta);
-            if (!options.isSyncable(meta.path)) continue;
+            // Unreadable or unsafe metadata (e.g. a path escaping the vault): skip that entry only.
+            const meta = yield* codec.openMeta(entry.path, entry.meta).pipe(
+              Effect.catchTag("CodecError", (error) =>
+                Effect.sync(() => {
+                  report.skipped++;
+                  log(`skipped ${entry.path}: ${error.message}`);
+                  activity("skipped", entry.path, error.message);
+                  return null;
+                }),
+              ),
+            );
+            if (meta === null || !options.isSyncable(meta.path)) continue;
             const base = state.base[meta.path];
             if (base && base.pathId === entry.path && base.version >= entry.version) continue;
             const size = entry.deleted ? 0 : meta.size;

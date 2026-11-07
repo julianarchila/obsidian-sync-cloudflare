@@ -13,15 +13,19 @@ import * as Effect from "effect/Effect";
 import * as HttpServerRequest from "effect/http/HttpServerRequest";
 import * as HttpServerResponse from "effect/http/HttpServerResponse";
 import * as Layer from "effect/Layer";
+import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
 
-import { isAuthorized } from "./auth.ts";
+import { isAuthorized, safeEqual } from "./auth.ts";
+import { makeMcpHandler, type McpClient, parseMcpClients } from "./mcp.ts";
+import { makeVaultOps, VaultNotFound, VaultOpsError } from "./vault-ops.ts";
 import { VaultObject } from "./vault-object.ts";
 
 /** Encrypted file chunks, keyed by `<vault>/<sha256 of the stored bytes>`. */
 export const Blobs = Cloudflare.R2.Bucket("Blobs");
 
 const VAULT_ROUTE = /^\/v1\/vaults\/([^/]+)(\/.*)$/;
+const MCP_ROUTE = /^\/mcp\/([^/]+)\/?$/;
 const BLOB_ROUTE = /^\/blobs\/([0-9a-f]{64})$/;
 const DO_ROUTES = new Set(["/changes", "/commit", "/history", "/deleted", "/meta", "/meta/replace", "/socket"]);
 /** Orphan uploads (never committed) younger than this are left alone. */
@@ -42,6 +46,10 @@ export default class SyncWorker extends Cloudflare.Worker<SyncWorker>()(
     const retentionDays = yield* Config.Number("OSCF_RETENTION_DAYS").pipe(Config.withDefault(365));
     const bucket = yield* Cloudflare.R2.ReadWriteBucket(Blobs);
     const vaults = yield* VaultObject;
+    const mcpClients = parseMcpClients(
+      Redacted.value(yield* Config.Redacted("OSCF_MCP_CLIENTS").pipe(Config.withDefault(Redacted.make("")))),
+    );
+    const mcp = makeMcpHandler();
 
     /** Forward a request to the vault's Durable Object, rewriting the path. */
     const callVault = (vault: string, route: string, init?: { method?: string; body?: string; source?: Request }) =>
@@ -89,6 +97,57 @@ export default class SyncWorker extends Cloudflare.Worker<SyncWorker>()(
           default:
             return text("Method not allowed", 405);
         }
+      });
+
+    /** Which MCP client a request comes from: the owner token, or one of OSCF_MCP_CLIENTS. */
+    /** MCP tokens come only from the Authorization header (never the URL, which ends up in logs). */
+    const mcpClient = (request: Request, vault: string): McpClient | null => {
+      const header = request.headers.get("authorization");
+      if (!header?.startsWith("Bearer ")) return null;
+      const presented = header.slice("Bearer ".length);
+      if (safeEqual(presented, Redacted.value(token))) return { name: "owner", access: "write", folders: [] };
+      const client = mcpClients.find((c) => safeEqual(presented, c.token));
+      const vaultAllowed = (pattern: string) => (pattern.endsWith("*") ? vault.startsWith(pattern.slice(0, -1)) : pattern === vault);
+      return client && client.vaults.some(vaultAllowed) ? client : null;
+    };
+
+    const mcpRequest = (request: Request, vault: string) =>
+      Effect.gen(function* () {
+        const client = mcpClient(request, vault);
+        if (client === null)
+          return HttpServerResponse.text("Unauthorized", {
+            status: 401,
+            headers: { "www-authenticate": 'Bearer realm="homebase"' },
+          });
+        // Bindings (R2, Durable Objects) need the Worker's runtime context.
+        const services = yield* Effect.context<never>();
+        const run = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+          Effect.runPromiseWith(services)(effect as unknown as Effect.Effect<A, E>);
+        const ops = makeVaultOps(
+          {
+            call: (route, init) => run(callVault(vault, route, init)),
+            getBlob: (hash) =>
+              run(
+                Effect.gen(function* () {
+                  const object = yield* bucket.get(`${vault}/${hash}`);
+                  return object === null ? null : new Uint8Array(yield* object.arrayBuffer());
+                }),
+              ),
+            hasBlob: (hash) => run(Effect.map(bucket.head(`${vault}/${hash}`), (head) => head !== null)),
+            putBlob: (hash, bytes) => run(Effect.asVoid(bucket.put(`${vault}/${hash}`, bytes))),
+          },
+          `mcp:${client.name}`,
+        );
+        const ready = yield* Effect.tryPromise(() => ops.ensurePlain()).pipe(Effect.result);
+        if (ready._tag === "Failure") {
+          const cause = ready.failure.cause;
+          if (cause instanceof VaultNotFound) return text(cause.message, 404);
+          return text(cause instanceof VaultOpsError ? cause.message : "Vault unavailable", 409);
+        }
+        const url = new URL(request.url);
+        url.pathname = "/mcp";
+        const response = yield* Effect.promise(() => mcp(new Request(url, request), { client, vault, ops }));
+        return HttpServerResponse.raw(response, { status: response.status });
       });
 
     const readJson = <A>(response: Response) => Effect.promise(() => response.json() as Promise<A>);
@@ -154,6 +213,12 @@ export default class SyncWorker extends Cloudflare.Worker<SyncWorker>()(
         const { pathname, searchParams } = new URL(request.url);
 
         if (pathname === "/health") return HttpServerResponse.text("ok");
+
+        const mcpMatch = MCP_ROUTE.exec(pathname);
+        if (mcpMatch) {
+          if (!isVaultId(mcpMatch[1]!)) return text("Bad vault id", 400);
+          return yield* mcpRequest(request, mcpMatch[1]!);
+        }
 
         const match = VAULT_ROUTE.exec(pathname);
         if (!match) return text("Not found", 404);

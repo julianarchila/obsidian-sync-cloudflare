@@ -8,6 +8,7 @@
 import { CommitRequest } from "@oscf/protocol";
 import * as Schema from "effect/Schema";
 
+import type { SearchIndex } from "./search-index.ts";
 import type { VaultStore } from "./store.ts";
 
 const json = (body: unknown, status = 200) =>
@@ -17,6 +18,18 @@ const decodeCommit = Schema.decodeUnknownSync(CommitRequest);
 const Hashes = Schema.Struct({ hashes: Schema.Array(Schema.String) });
 const decodeHashes = Schema.decodeUnknownSync(Hashes);
 const decodeReplace = Schema.decodeUnknownSync(Schema.Struct({ expected: Schema.String, next: Schema.String }));
+const decodeIndex = Schema.decodeUnknownSync(
+  Schema.Struct({
+    docs: Schema.Array(
+      Schema.Struct({
+        pathId: Schema.String,
+        seq: Schema.Int,
+        path: Schema.NullOr(Schema.String),
+        text: Schema.NullOr(Schema.String),
+      }),
+    ),
+  }),
+);
 
 export interface VaultHttpResult {
   readonly response: Response;
@@ -28,6 +41,7 @@ export const handleVaultHttp = async (
   store: VaultStore,
   request: Request,
   route: string,
+  index?: SearchIndex,
 ): Promise<VaultHttpResult> => {
   const url = new URL(request.url);
   const int = (name: string, fallback: number) => {
@@ -52,6 +66,34 @@ export const handleVaultHttp = async (
         const path = url.searchParams.get("path");
         if (!path) return { response: json({ error: "missing path" }, 400) };
         return { response: json({ entries: store.history(path) }) };
+      }
+
+      case "GET /recent":
+        return { response: json({ entries: store.recent(Math.min(int("limit", 50), 500), int("since", 0)) }) };
+
+      // Search index (used by the Worker's MCP endpoint, never by devices).
+      case "GET /index/pending":
+        if (!index) break;
+        return { response: json({ docs: index.pending(Math.min(int("limit", 50), 500)), backlog: index.backlog() }) };
+
+      case "POST /index":
+        if (!index) break;
+        index.apply(decodeIndex(await request.json()).docs);
+        return { response: json({ backlog: index.backlog() }) };
+
+      case "GET /search":
+        if (!index) break;
+        return {
+          response: json({
+            hits: index.search(url.searchParams.get("q") ?? "", Math.min(int("limit", 20), 200)),
+            backlog: index.backlog(),
+          }),
+        };
+
+      case "GET /moved-from": {
+        const path = url.searchParams.get("path");
+        if (!path) return { response: json({ error: "missing path" }, 400) };
+        return { response: json({ paths: store.movedFrom(path) }) };
       }
 
       case "GET /deleted":
@@ -84,8 +126,9 @@ export const handleVaultHttp = async (
       }
 
       default:
-        return { response: json({ error: "not found" }, 404) };
+        break;
     }
+    return { response: json({ error: "not found" }, 404) };
   } catch (error) {
     return { response: json({ error: error instanceof Error ? error.message : String(error) }, 400) };
   }

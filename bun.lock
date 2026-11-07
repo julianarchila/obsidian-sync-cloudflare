@@ -16,6 +16,16 @@
         "typescript": "^5.9.3",
       },
     },
+    "packages/cli": {
+      "name": "@oscf/cli",
+      "bin": {
+        "homebase": "./src/main.ts",
+      },
+      "dependencies": {
+        "@oscf/protocol": "workspace:*",
+        "effect": "4.1.2",
+      },
+    },
     "packages/plugin": {
       "name": "@oscf/plugin",
       "dependencies": {
@@ -213,6 +223,8 @@
     "@jridgewell/sourcemap-codec": ["@jridgewell/sourcemap-codec@1.6.0", "", {}, "sha512-T7jf+5zgsZHwNJ4lvQ7/aezbyk0nNX+zJVWpmHA7VYsEx7a7qr5Rg5IbtJFqkgze5Y2sruq1RUY8Q837Od7iFw=="],
 
     "@marijn/find-cluster-break": ["@marijn/find-cluster-break@1.0.4", "", {}, "sha512-Wy0V7+SGUjnF9/TkiM1hKVDPj7jKXduPNboMVtHTA8dySMURWqfg/JZ9E2Sq8JgSJmkl7k7Qe9FLeMSrSraWmQ=="],
+
+    "@oscf/cli": ["@oscf/cli@workspace:packages/cli"],
 
     "@oscf/plugin": ["@oscf/plugin@workspace:packages/plugin"],
 

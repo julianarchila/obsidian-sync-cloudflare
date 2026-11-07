@@ -36,6 +36,8 @@ export const Entry = Schema.Struct({
   meta: Schema.String,
   device: Schema.String,
   createdAt: Schema.Number,
+  /** Set on the tombstone a rename leaves behind: where the file went. */
+  movedTo: Schema.optionalKey(PathId),
 });
 export type Entry = typeof Entry.Type;
 

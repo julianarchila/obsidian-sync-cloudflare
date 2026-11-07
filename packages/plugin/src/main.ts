@@ -1,14 +1,12 @@
 import { type App, Notice, Platform, Plugin, PluginSettingTab, Setting, setIcon, type TAbstractFile, TFile } from "obsidian";
 import * as Effect from "effect/Effect";
-import * as Base64 from "effect/encoding/Base64";
-import * as Result from "effect/Result";
 
 import { type ConfigSyncSettings, DEFAULT_CONFIG_SYNC, makeIsConfigSyncable, mergeConfig } from "./core/config.ts";
-import { makeCryptoCodec } from "./core/crypto-codec.ts";
 import { DEFAULT_SELECTIVE, makeIsSyncable, type SelectiveSettings, selectiveFingerprint } from "./core/filter.ts";
 import { makeHttpRemote } from "./core/http-remote.ts";
 import { mergeText } from "./core/merge.ts";
-import { changeVaultPassword, unlockVault } from "./core/unlock.ts";
+import { plainCodec } from "./core/plain-codec.ts";
+import { openPlainVault } from "./core/plain-vault.ts";
 import { combinedVaultIo, obsidianConfigIo, obsidianHttp, obsidianLocalState, obsidianVaultIo } from "./obsidian/adapters.ts";
 import { DeletedFilesModal, HistoryModal } from "./obsidian/history-modal.ts";
 import { formatBytes, formatProgress, STATE_ICON, STATE_LABEL, type SyncState, SyncStatus } from "./obsidian/status.ts";
@@ -20,8 +18,6 @@ interface Settings {
   vaultId: string;
   token: string;
   device: string;
-  /** Keep the derived key on this device so the password isn't asked again. */
-  rememberKey: boolean;
   selective: SelectiveSettings;
   /** Which parts of the config dir (.obsidian) this device syncs. */
   configSync: ConfigSyncSettings;
@@ -29,8 +25,6 @@ interface Settings {
 
 interface Data {
   settings: Settings;
-  /** Derived master key (base64), only when `rememberKey`. Never the password. */
-  key?: string;
   /** Selective-sync fingerprint of the last run; a change triggers a full index re-read. */
   selectiveFingerprint?: string;
 }
@@ -40,7 +34,6 @@ const DEFAULTS: Settings = {
   vaultId: "",
   token: "",
   device: Platform.isMobile ? "mobile" : "desktop",
-  rememberKey: true,
   selective: DEFAULT_SELECTIVE,
   configSync: DEFAULT_CONFIG_SYNC,
 };
@@ -51,11 +44,7 @@ const UNLOCK_RETRY_MAX_MS = 60_000;
 
 export default class CloudflareSyncPlugin extends Plugin {
   data: Data = { settings: { ...DEFAULTS } };
-  /** Entered in settings; used once to unlock, never stored. */
-  password: string | undefined;
   lockMessage = "";
-  /** Unlocked vault key, kept in memory for this session (for password changes). */
-  private vaultKey: Uint8Array | undefined;
   private client: SyncClient | undefined;
   readonly sync = new SyncStatus();
   private statusBar!: HTMLElement;
@@ -72,10 +61,8 @@ export default class CloudflareSyncPlugin extends Plugin {
   }
 
   override async onload() {
-    const stored = (await this.loadData()) as (Partial<Data> & { settings?: Partial<Settings> & { password?: string } }) | null;
-    // A one-shot `password` in data.json (automation) is consumed and removed.
-    this.password = stored?.settings?.password;
-    const { password: _ignored, ...settings }: Partial<Settings> & { password?: string } = stored?.settings ?? {};
+    const stored = (await this.loadData()) as Partial<Data> | null;
+    const settings: Partial<Settings> = stored?.settings ?? {};
     this.data = {
       settings: {
         ...DEFAULTS,
@@ -86,7 +73,6 @@ export default class CloudflareSyncPlugin extends Plugin {
         },
         configSync: { ...DEFAULT_CONFIG_SYNC, ...settings.configSync },
       },
-      key: stored?.key,
       selectiveFingerprint: stored?.selectiveFingerprint,
     };
 
@@ -101,15 +87,6 @@ export default class CloudflareSyncPlugin extends Plugin {
     this.addSettingTab(new SettingsTab(this.app, this));
     this.addCommand({ id: "full-sync", name: "Sync now", callback: () => void this.client?.fullSync() });
     this.addCommand({ id: "reconnect", name: "Reconnect", callback: () => void this.restart() });
-    this.addCommand({
-      id: "forget-key",
-      name: "Lock vault (forget key on this device)",
-      callback: async () => {
-        delete this.data.key;
-        await this.saveData(this.data);
-        await this.restart();
-      },
-    });
 
     // ---- version history and recovery (M4)
     this.addCommand({
@@ -184,28 +161,6 @@ export default class CloudflareSyncPlugin extends Plugin {
     );
   }
 
-  get unlocked() {
-    return this.vaultKey !== undefined;
-  }
-
-  /** Re-wrap the vault key with a new password. Nothing is re-encrypted; other devices keep working. */
-  async changePassword(newPassword: string) {
-    const { serverUrl, vaultId, token } = this.conf;
-    if (!this.vaultKey) throw new Error("Unlock the vault first.");
-    const remote = makeHttpRemote({ serverUrl, vaultId, token, http: obsidianHttp });
-    const result = await Effect.runPromise(changeVaultPassword(remote, this.vaultKey, newPassword).pipe(Effect.result));
-    if (result._tag === "Failure") {
-      const e = result.failure;
-      throw new Error(
-        e._tag === "RemoteError"
-          ? `Server unreachable: ${e.message}`
-          : e.reason === "Concurrent"
-            ? "The password was changed on another device at the same time. Reconnect and try again."
-            : "This device's key does not match the vault anymore.",
-      );
-    }
-  }
-
   private runner() {
     const client = this.client;
     if (!client) {
@@ -274,26 +229,13 @@ export default class CloudflareSyncPlugin extends Plugin {
     const { serverUrl, vaultId, token, device } = this.conf;
     if (!serverUrl || !vaultId || !token) return this.setState("not-configured");
 
-    // ---- unlock end-to-end encryption
+    // ---- open the vault (created as plain on first use)
     this.setState("unlocking");
     const remote = makeHttpRemote({ serverUrl, vaultId, token, http: obsidianHttp });
-    const remembered = this.data.key ? Result.getOrUndefined(Base64.decode(this.data.key)) : undefined;
-    const unlocked = await Effect.runPromise(
-      unlockVault(remote, { password: this.password, rememberedKey: remembered }).pipe(Effect.result),
-    );
-    this.password = undefined;
-    if (unlocked._tag === "Failure") {
-      const error = unlocked.failure;
-      this.lockMessage =
-        error._tag === "RemoteError"
-          ? `Server unreachable: ${error.message}`
-          : error.reason === "WrongPassword"
-            ? "Wrong vault password."
-            : error.reason === "BadRecord"
-              ? "The vault's encryption record is unreadable."
-              : error.isNewVault
-                ? "New vault: set a password in settings to create it."
-                : "Enter the vault password in settings.";
+    const opened = await Effect.runPromise(openPlainVault(remote).pipe(Effect.result));
+    if (opened._tag === "Failure") {
+      const error = opened.failure;
+      this.lockMessage = error._tag === "RemoteError" ? `Server unreachable: ${error.message}` : error.message;
       this.setState(error._tag === "RemoteError" ? "offline" : "locked", this.lockMessage);
       if (error._tag !== "RemoteError") new Notice(`Homebase: ${this.lockMessage}`);
       else {
@@ -305,14 +247,10 @@ export default class CloudflareSyncPlugin extends Plugin {
     }
     this.unlockBackoff = UNLOCK_RETRY_MIN_MS;
     this.lockMessage = "";
-    this.vaultKey = unlocked.success.master;
-    if (unlocked.success.created) new Notice("Homebase: vault created and encrypted with your password.");
-    if (this.conf.rememberKey) this.data.key = Base64.encode(unlocked.success.master);
-    else delete this.data.key;
-    await this.saveData(this.data);
+    if (opened.success.created) new Notice("Homebase: new vault created.");
 
     // ---- start syncing
-    const codec = await Effect.runPromise(makeCryptoCodec(unlocked.success.master));
+    const codec = plainCodec;
     const pluginDir = this.manifest.dir ?? "";
     const configDir = this.app.vault.configDir;
     const fingerprint = `${selectiveFingerprint(this.conf.selective)}|${JSON.stringify(this.conf.configSync)}`;
@@ -393,61 +331,7 @@ class SettingsTab extends PluginSettingTab {
     text("Token", "The OSCF_TOKEN you deployed with.", "token", true);
     text("Device name", "Shown in conflict file names.", "device");
 
-    new Setting(containerEl).setHeading().setName("Encryption");
     if (this.plugin.lockMessage) containerEl.createEl("p", { text: this.plugin.lockMessage, cls: "mod-warning" });
-    new Setting(containerEl)
-      .setName("Vault password")
-      .setDesc(
-        "Everything is encrypted on this device before upload. On a new vault this sets the password; " +
-          "if you lose it, your data cannot be recovered.",
-      )
-      .addText((input) => {
-        input.inputEl.type = "password";
-        input.setPlaceholder(this.plugin.data.key ? "Unlocked (key remembered)" : "Enter password");
-        input.onChange((value) => {
-          this.plugin.password = value;
-        });
-      });
-    new Setting(containerEl)
-      .setName("Remember key on this device")
-      .setDesc("Stores the derived key (not the password) in this plugin's data.")
-      .addToggle((toggle) =>
-        toggle.setValue(settings.rememberKey).onChange((value) => {
-          settings.rememberKey = value;
-        }),
-      );
-
-    let nextPassword = "";
-    let confirmPassword = "";
-    new Setting(containerEl)
-      .setName("Change vault password")
-      .setDesc(
-        "Re-wraps the vault key: nothing is re-encrypted and your other devices keep syncing. New devices will need the new password.",
-      )
-      .addText((input) => {
-        input.inputEl.type = "password";
-        input.setPlaceholder("New password").onChange((v) => (nextPassword = v));
-      })
-      .addText((input) => {
-        input.inputEl.type = "password";
-        input.setPlaceholder("Confirm").onChange((v) => (confirmPassword = v));
-      })
-      .addButton((button) =>
-        button
-          .setButtonText("Change password")
-          .setDisabled(!this.plugin.unlocked)
-          .onClick(async () => {
-            if (nextPassword.length < 8) return new Notice("Use at least 8 characters.");
-            if (nextPassword !== confirmPassword) return new Notice("The passwords don't match.");
-            try {
-              await this.plugin.changePassword(nextPassword);
-              new Notice("Vault password changed.");
-              this.display();
-            } catch (error) {
-              new Notice(`Could not change the password: ${error instanceof Error ? error.message : String(error)}`);
-            }
-          }),
-      );
 
     new Setting(containerEl).setHeading().setName("Selective sync");
     new Setting(containerEl)

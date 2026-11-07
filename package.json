@@ -11,7 +11,7 @@
     "plan": "alchemy plan",
     "destroy": "alchemy destroy",
     "check": "bun run typecheck && bun run test && bun run check:bundle",
-    "typecheck": "tsc -p packages/protocol && tsc -p packages/server && tsc -p packages/plugin && tsc -p . && tsc -p tsconfig.test.json",
+    "typecheck": "tsc -p packages/protocol && tsc -p packages/server && tsc -p packages/plugin && tsc -p packages/cli && tsc -p . && tsc -p tsconfig.test.json",
     "test": "bun test packages",
     "check:bundle": "bun scripts/check-bundle.ts",
     "plugin:build": "bun run --cwd packages/plugin build",

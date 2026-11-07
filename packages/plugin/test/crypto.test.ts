@@ -91,7 +91,8 @@ describe("engine with end-to-end encryption", () => {
     const intruder = await new Device("x", server, {}, other).start();
     a.write("n.md", "secret");
     await a.sync();
-    await expect(intruder.sync()).rejects.toBeDefined();
+    // Unreadable entries are skipped one by one instead of failing the whole sync.
+    expect((await intruder.sync()).skipped).toBe(1);
     expect(intruder.snapshot()).toEqual({});
   });
 });
