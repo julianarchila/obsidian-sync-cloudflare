@@ -22,7 +22,7 @@ import * as Effect from "effect/Effect";
 
 import { fetchHttp, makeHttpRemote } from "../../plugin/src/core/http-remote.ts";
 import { deletedFiles, fileHistory, restoreDeleted, restoreVersion } from "../../plugin/src/core/history.ts";
-import { rewriteLinks } from "../../plugin/src/core/links.ts";
+import { rebaseLinks, rewriteLinks } from "../../plugin/src/core/links.ts";
 import { openPlainVault } from "../../plugin/src/core/plain-vault.ts";
 import * as fs from "node:fs/promises";
 import { IGNORE_FILE } from "./ignore.ts";
@@ -143,7 +143,18 @@ const main = async () => {
 
     case "watch": {
       const root = await dirArg(0);
-      await ensurePlain((await openVault(root)).config);
+      // The server may not be reachable yet (boot, network down): wait for it instead of exiting.
+      for (let delay = 2000; ; delay = Math.min(delay * 2, 60_000)) {
+        try {
+          await ensurePlain((await openVault(root)).config);
+          break;
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          if (/does not support|encryption|Unauthorized|401|not a Homebase folder|No token/i.test(message)) throw error;
+          log(`server not reachable (${message}); retrying in ${delay / 1000} s`);
+          await new Promise((resolve) => setTimeout(resolve, delay));
+        }
+      }
       await watch(root);
       return;
     }
@@ -238,7 +249,9 @@ const main = async () => {
         for (const file of await Effect.runPromise(vault.io.list)) {
           if (!/\.md$/i.test(file.path)) continue;
           const abs = nodePath.join(root, ...file.path.split("/"));
-          const { text, count } = rewriteLinks(await fs.readFile(abs, "utf8"), from, to);
+          const original = await fs.readFile(abs, "utf8");
+          // The moved note itself: re-point its own relative links from its new folder.
+          const { text, count } = file.path === to ? rebaseLinks(original, from, to) : rewriteLinks(original, from, to, file.path);
           if (count === 0) continue;
           await writeAtomic(abs, text);
           touched.add(file.path);

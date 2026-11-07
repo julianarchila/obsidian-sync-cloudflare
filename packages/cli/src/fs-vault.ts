@@ -60,16 +60,19 @@ export const fsVaultIo = (root: string, isIgnored: (path: string) => boolean): V
     }
   };
 
+  /** Every non-ignored file, statted in parallel (a 20k-file folder is scanned on every change). */
   const walk = async (dir: string, prefix: string, out: FileStat[]) => {
+    const files: string[] = [];
+    const dirs: Array<[string, string]> = [];
     for (const entry of await fs.readdir(dir, { withFileTypes: true })) {
       const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
       if (isIgnored(rel)) continue;
-      if (entry.isDirectory()) await walk(nodePath.join(dir, entry.name), rel, out);
-      else if (entry.isFile()) {
-        const s = await stat(rel);
-        if (s) out.push(s);
-      }
+      if (entry.isDirectory()) dirs.push([nodePath.join(dir, entry.name), rel]);
+      else if (entry.isFile()) files.push(rel);
     }
+    for (let i = 0; i < files.length; i += 64)
+      for (const s of await Promise.all(files.slice(i, i + 64).map(stat))) if (s) out.push(s);
+    await Promise.all(dirs.map(([abs, rel]) => walk(abs, rel, out)));
     return out;
   };
 

@@ -245,6 +245,15 @@ await fs.rm(path.join(A, "burst"), { recursive: true });
 ms = await waitFor(async () => !(await exists(B, "burst")), 60_000);
 check("watch: deleting the burst folder reaches B", ms !== null, ms === null ? "timeout" : `${ms} ms`);
 
+// .homebaseignore edits apply without restarting watch
+await write(A, ".homebaseignore", "# local only\ndrafts/\n*.log\n/build\nlater/\n");
+await sleep(1500);
+await write(A, "later/secret.md", "stays local\n");
+await write(A, "now/visible.md", "syncs\n");
+const visible = await waitFor(() => exists(B, "now/visible.md"), 15_000);
+await sleep(1500);
+check("watch reloads .homebaseignore", visible !== null && !(await exists(B, "later/secret.md")));
+
 wa.proc.kill("SIGTERM");
 wb.proc.kill("SIGTERM");
 const codes = await Promise.all([wa.proc.exited, wb.proc.exited]);

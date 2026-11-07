@@ -101,7 +101,11 @@ const ACTIVITY_ICON: Record<Activity["kind"], string> = {
   skipped: "! skipped",
 };
 
+/** Under systemd, journald timestamps every line already. */
+const underJournal = process.env.JOURNAL_STREAM !== undefined;
+
 export const log = (message: string) => {
+  if (underJournal) return console.log(message);
   const time = new Date().toTimeString().slice(0, 8);
   console.log(`[${time}] ${message}`);
 };
@@ -109,10 +113,38 @@ export const log = (message: string) => {
 export const formatActivity = (a: Activity) =>
   `${ACTIVITY_ICON[a.kind]} ${a.path}${a.detail ? ` (${a.kind === "renamed" ? `from ${a.detail}` : a.detail})` : ""}`;
 
+/**
+ * Activity lines, at most ACTIVITY_LINES per second; the rest are counted and
+ * summarized, so a 20k-file sync doesn't flood the log.
+ */
+const ACTIVITY_LINES = 40;
+let shown = 0;
+let hidden = 0;
+let windowStart = 0;
+const activityLog = (activity: Activity) => {
+  const now = Date.now();
+  if (now - windowStart > 1000) {
+    if (hidden > 0) log(`… and ${hidden} more change(s)`);
+    windowStart = now;
+    shown = 0;
+    hidden = 0;
+  }
+  if (shown++ < ACTIVITY_LINES) log(formatActivity(activity));
+  else {
+    hidden++;
+    if (hidden === 1) setTimeout(() => hidden > 0 && (log(`… and ${hidden} more change(s)`), (hidden = 0)), 1000);
+  }
+};
+
 export const openVault = async (root: string, overrides: Partial<EngineOptions> = {}) => {
   const config = await readConfig(root);
   const token = await readToken(config);
-  const isIgnored = await loadIgnore(root);
+  // Reloadable: `watch` picks up edits to .homebaseignore without a restart.
+  let ignoreRules = await loadIgnore(root);
+  const isIgnored = (path: string) => ignoreRules(path);
+  const reloadIgnore = async () => {
+    ignoreRules = await loadIgnore(root);
+  };
   const io = fsVaultIo(root, isIgnored);
   const remote = makeHttpRemote({ serverUrl: config.url, vaultId: config.vault, token, http: fetchHttp() });
   const layer = Layer.mergeAll(
@@ -127,11 +159,11 @@ export const openVault = async (root: string, overrides: Partial<EngineOptions> 
       isSyncable: (path) => !isIgnored(path),
       merge: mergeText,
       log,
-      onActivity: (activity) => log(formatActivity(activity)),
+      onActivity: activityLog,
       ...overrides,
     }).pipe(Effect.provide(layer)),
   );
   const run = <A, E>(effect: Effect.Effect<A, E, VaultIo | Remote | Codec | LocalState>) =>
     Effect.runPromise(effect.pipe(Effect.provide(layer)));
-  return { config, token, remote, engine, run, io, isIgnored };
+  return { config, token, remote, engine, run, io, isIgnored, reloadIgnore };
 };

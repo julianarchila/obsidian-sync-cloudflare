@@ -19,7 +19,7 @@ import * as HttpRouter from "effect/http/HttpRouter";
 import * as HttpServer from "effect/http/HttpServer";
 import * as Layer from "effect/Layer";
 
-import { baseName, linksTo, rewriteLinks, WIKILINK } from "../../plugin/src/core/links.ts";
+import { baseName, hasLinkTo, rebaseLinks, rewriteLinks } from "../../plugin/src/core/links.ts";
 import { diffLines, merge3 } from "../../plugin/src/core/merge.ts";
 import { encode, type FileInfo, isTextPath, type VaultOps } from "./vault-ops.ts";
 
@@ -265,9 +265,7 @@ const backlinks = async (ops: VaultOps, client: McpClient, path: string) => {
     const file = await ops.current(hit.path);
     if (!file) continue;
     const text = await ops.text(file);
-    WIKILINK.lastIndex = 0;
-    const hasWiki = [...text.matchAll(WIKILINK)].some((m) => linksTo(m[2]!, path));
-    if (hasWiki || text.includes(`](${path})`) || text.includes(`](${encodeURI(path)})`)) out.push({ file, text });
+    if (hasLinkTo(text, path, file.path)) out.push({ file, text });
   }
   return out;
 };
@@ -454,7 +452,7 @@ const tools: ToolDef[] = [
         text: found
           .map(({ file, text }) => {
             const lines = text.split("\n").filter((line) => line.includes("[[") || line.includes("]("));
-            const hits = lines.filter((line) => [...line.matchAll(WIKILINK)].some((m) => linksTo(m[2]!, path)) || line.includes(path));
+            const hits = lines.filter((line) => hasLinkTo(line, path, file.path));
             return `${file.path}\n${hits.slice(0, 3).map((l) => `  ${l.trim()}`).join("\n")}`;
           })
           .join("\n"),
@@ -631,11 +629,25 @@ const tools: ToolDef[] = [
         throw new ToolError(result.current?.path === to ? `${to} already exists.` : `${from} changed meanwhile; try again.`);
       const updated: string[] = [];
       const failed: string[] = [];
+      // The moved note's own relative Markdown links now start from another folder.
+      if (/\.md$/i.test(to)) {
+        try {
+          let count = 0;
+          await saveText(ops, to, (text) => {
+            const rebased = rebaseLinks(text ?? "", from, to);
+            count = rebased.count;
+            return rebased.text;
+          });
+          if (count > 0) updated.push(`${to} (${count})`);
+        } catch {
+          failed.push(to);
+        }
+      }
       for (const { file: other } of linking) {
         try {
           let count = 0;
           await saveText(ops, other.path, (text) => {
-            const rewritten = rewriteLinks(text ?? "", from, to);
+            const rewritten = rewriteLinks(text ?? "", from, to, other.path);
             count = rewritten.count;
             return rewritten.text;
           });

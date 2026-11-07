@@ -13,11 +13,17 @@ import * as Effect from "effect/Effect";
 import { Connection, type SocketLike, type Timers } from "../../plugin/src/core/connection.ts";
 import { socketUrl } from "../../plugin/src/core/http-remote.ts";
 import { STATE_DIR } from "./fs-vault.ts";
+import { IGNORE_FILE } from "./ignore.ts";
 import { log, openVault, writeStatus } from "./vault.ts";
 
 const DEBOUNCE_MS = 1000;
 /** Local-only safety rescan (no network unless something changed). */
 const RESCAN_MS = 5 * 60 * 1000;
+/** Without file events (watch limit reached), rescan this often instead. */
+const POLL_MS = 10 * 1000;
+/** After a failed sync, retry with backoff (on top of the socket's own reconnects). */
+const RETRY_MIN_MS = 5 * 1000;
+const RETRY_MAX_MS = 5 * 60 * 1000;
 
 const timers: Timers = {
   now: () => Date.now(),
@@ -39,6 +45,8 @@ export const watch = async (root: string) => {
   let remoteSeq = 0;
   let running: Promise<void> | undefined;
   let queued: { full: boolean; pull: boolean; dirty: Set<string> } | undefined;
+  let retry: ReturnType<typeof setTimeout> | undefined;
+  let retryDelay = RETRY_MIN_MS;
 
   const connection = new Connection({
     open: () => new WebSocket(socketUrl({ serverUrl: config.url, vaultId: config.vault, token })) as unknown as SocketLike,
@@ -69,11 +77,16 @@ export const watch = async (root: string) => {
           `synced: ${report.pulled} pulled, ${report.pushed} pushed, ${report.merged} merged, ${report.conflicts} conflicts, ${report.skipped} skipped`,
         );
       await writeStatus(root, { at: Date.now(), ok: true });
+      retryDelay = RETRY_MIN_MS;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      log(`sync failed: ${message}`);
+      log(`sync failed: ${message} (retrying in ${Math.round(retryDelay / 1000)} s)`);
       await writeStatus(root, { at: Date.now(), ok: false, error: message });
       if (paths) for (const p of paths) dirty.add(p);
+      // Don't wait for the next file event or the 5-minute rescan.
+      clearTimeout(retry);
+      retry = setTimeout(() => schedule(true, true), retryDelay);
+      retryDelay = Math.min(retryDelay * 2, RETRY_MAX_MS);
     }
   };
 
@@ -113,14 +126,40 @@ export const watch = async (root: string) => {
     // report just one (possibly ignored, e.g. a temp file) path for many changes,
     // so any other event triggers a full stat-only scan.
     if (path !== null && (path === STATE_DIR || path.startsWith(`${STATE_DIR}/`))) return;
+    if (path === IGNORE_FILE)
+      void vault.reloadIgnore().then(() => log(`reloaded ${IGNORE_FILE}`), (e: Error) => log(`${IGNORE_FILE}: ${e.message}`));
     needFull = true;
     clearTimeout(debounce);
     debounce = setTimeout(() => schedule(false, behind()), DEBOUNCE_MS);
   };
 
-  const watcher: FSWatcher = fsWatch(root, { recursive: true }, (_event, filename) =>
-    onEvent(filename ? String(filename).split(nodePath.sep).join("/") : null),
-  );
+  /**
+   * Without file events (e.g. Linux's inotify watch limit, ENOSPC), keep syncing by
+   * polling: a full scan is stat-only and makes no request unless something changed.
+   */
+  let poll: ReturnType<typeof setInterval> | undefined;
+  const fallBackToPolling = (error: NodeJS.ErrnoException) => {
+    if (poll !== undefined) return;
+    const limit =
+      error.code === "ENOSPC"
+        ? " The inotify watch limit was reached; raise it with `sudo sysctl fs.inotify.max_user_watches=524288` (and in /etc/sysctl.d/) for instant updates."
+        : "";
+    log(`can't watch the folder for changes (${error.code ?? error.message}).${limit} Scanning every ${POLL_MS / 1000} s instead.`);
+    poll = setInterval(() => schedule(true, false), POLL_MS);
+  };
+
+  let watcher: FSWatcher | undefined;
+  try {
+    watcher = fsWatch(root, { recursive: true }, (_event, filename) =>
+      onEvent(filename ? String(filename).split(nodePath.sep).join("/") : null),
+    );
+    watcher.on("error", (error) => {
+      watcher?.close();
+      fallBackToPolling(error as NodeJS.ErrnoException);
+    });
+  } catch (error) {
+    fallBackToPolling(error as NodeJS.ErrnoException);
+  }
 
   log(`watching ${root} (vault ${config.vault} on ${config.url}, device ${config.device})`);
   connection.start();
@@ -137,7 +176,9 @@ export const watch = async (root: string) => {
       while (running) await running;
       stopped = true;
       clearInterval(rescan);
-      watcher.close();
+      clearInterval(poll);
+      clearTimeout(retry);
+      watcher?.close();
       connection.stop();
       resolve();
     };
