@@ -332,4 +332,116 @@ describe("engine: files this device can't write", () => {
     expect(server.store.current('Clippings/Farhan on X "Modal".md')?.deleted).toBe(false);
     expect(server.store.current("Clippings/Is it S3?.md")?.deleted).toBe(false);
   });
+
+  test("entries with bad metadata or unsafe paths are skipped; the rest syncs", async () => {
+    const { server, devices: [a] } = await setup(1);
+    a!.write("good.md", "ok");
+    await a!.sync();
+    const meta = (path: string) => JSON.stringify({ path, hash: "0".repeat(64), size: 0, mtime: 0 });
+    server.store.commit([
+      { op: "put", path: "mismatch.md", baseVersion: null, chunks: [], meta: meta("elsewhere.md"), device: "x" },
+      { op: "put", path: "../escape.md", baseVersion: null, chunks: [], meta: meta("../escape.md"), device: "x" },
+      { op: "put", path: "garbage.md", baseVersion: null, chunks: [], meta: "not json", device: "x" },
+    ]);
+
+    const { Device } = await import("./harness.ts");
+    const b = await new Device("b", server).start();
+    expect((await b.sync()).skipped).toBe(3);
+    expect(b.snapshot()).toEqual({ "good.md": "ok" });
+  });
+});
+
+describe("engine: moves", () => {
+  test("a move edited in the same pass keeps its history", async () => {
+    const { server, devices: [a, b] } = await setup();
+    a!.write("Inbox/Plan.md", "v1\n");
+    await a!.sync();
+    await b!.sync();
+    a!.rename("Inbox/Plan.md", "Projects/Plan.md");
+    a!.write("Projects/Plan.md", "v1\nedited while moving\n");
+    await a!.sync();
+    await b!.sync();
+    expect(b!.snapshot()).toEqual({ "Projects/Plan.md": "v1\nedited while moving\n" });
+    // Recorded as a move plus an edit, not a delete and an unrelated new file.
+    expect(server.store.movedFrom("Projects/Plan.md")).toEqual(["Inbox/Plan.md"]);
+    expect(server.store.history("Projects/Plan.md").length).toBe(2);
+    expect(server.store.deleted().length).toBe(0);
+  });
+
+  test("same file name elsewhere is not a move for settings files or a different note", async () => {
+    const { server, devices: [a] } = await setup(1);
+    a!.write(".obsidian/plugins/x/main.js", "x plugin");
+    a!.write("Old/README.md", "short");
+    await a!.sync();
+    a!.remove(".obsidian/plugins/x/main.js");
+    a!.write(".obsidian/plugins/y/main.js", "y plugin, different");
+    a!.remove("Old/README.md");
+    a!.write("New/README.md", "a much longer, unrelated note\n".repeat(200));
+    await a!.sync();
+    expect(server.store.movedFrom(".obsidian/plugins/y/main.js")).toEqual([]);
+    expect(server.store.movedFrom("New/README.md")).toEqual([]);
+    expect(server.store.deleted().map((e) => e.path).sort()).toEqual([".obsidian/plugins/x/main.js", "Old/README.md"]);
+  });
+
+  test("moved offline while edited elsewhere: the edit lands at the new path, no duplicate", async () => {
+    const { devices: [a, b] } = await setup();
+    a!.write("Trip.md", "draft\n");
+    await a!.sync();
+    await b!.sync();
+    b!.rename("Trip.md", "Travel/Trip.md"); // b is offline: not synced yet
+    a!.write("Trip.md", "draft\nedited on a\n");
+    await a!.sync();
+    await b!.sync();
+    await a!.sync();
+    expect(b!.snapshot()).toEqual({ "Travel/Trip.md": "draft\nedited on a\n" });
+    expect(a!.snapshot()).toEqual(b!.snapshot());
+  });
+
+  test("receiving a rename reuses the local bytes instead of downloading them again", async () => {
+    const { server, devices: [a, b] } = await setup();
+    for (let i = 0; i < 20; i++) a!.write(`Old/n${i}.md`, `note ${i}`);
+    await a!.sync();
+    await b!.sync();
+    for (let i = 0; i < 20; i++) a!.rename(`Old/n${i}.md`, `New/n${i}.md`);
+    await a!.sync();
+    server.ops = [];
+    await b!.sync();
+    expect(Object.keys(b!.snapshot()).every((p) => p.startsWith("New/"))).toBe(true);
+    expect(Object.keys(b!.snapshot()).length).toBe(20);
+    expect(server.ops.filter((op) => op === "getBlob").length).toBe(0);
+  });
+});
+
+describe("engine: a vault id that names a new vault", () => {
+  test("state saved for the old vault is dropped; the device joins the new one without losing files", async () => {
+    const { Device, Server } = await import("./harness.ts");
+    const old = new Server();
+    const a = await new Device("a", old, { vaultInstance: "one" }).start();
+    a.write("note.md", "kept");
+    a.write("gone.md", "deleted here, never uploaded again");
+    await a.sync();
+    a.remove("gone.md");
+
+    // The vault was deleted and created again under the same id, and another device filled it.
+    const fresh = new Server();
+    const b = await new Device("b", fresh, { vaultInstance: "two" }).start();
+    b.write("note.md", "kept");
+    b.write("from-b.md", "new");
+    await b.sync();
+
+    const a2 = new Device("a", fresh, { vaultInstance: "two" });
+    for (const [path, file] of a.files) a2.files.set(path, file);
+    a2.state = structuredClone(a.state);
+    await a2.start();
+    expect(a2.engine.state.cursor).toBe(0);
+    await a2.sync();
+    expect(a2.snapshot()).toEqual({ "from-b.md": "new", "note.md": "kept" });
+    expect(fresh.store.history("note.md").length).toBe(1); // identical file adopted, not re-uploaded
+
+    // Same vault: the saved state is kept.
+    const a3 = new Device("a", fresh, { vaultInstance: "two" });
+    a3.state = structuredClone(a2.state);
+    await a3.start();
+    expect(a3.engine.state.cursor).toBe(a2.state.cursor);
+  });
 });

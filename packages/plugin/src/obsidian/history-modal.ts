@@ -6,9 +6,9 @@ import type * as Effect from "effect/Effect";
 
 import { deletedFiles, fileHistory, readVersion, restoreDeleted, restoreVersion, type VersionInfo } from "../core/history.ts";
 import { diffLines } from "../core/merge.ts";
-import type { Codec, Remote, VaultIo } from "../core/services.ts";
+import type { Remote, VaultIo } from "../core/services.ts";
 
-export type Run = <A, E>(effect: Effect.Effect<A, E, Codec | Remote | VaultIo>) => Promise<A>;
+export type Run = <A, E>(effect: Effect.Effect<A, E, Remote | VaultIo>) => Promise<A>;
 
 const when = (ms: number) => new Date(ms).toLocaleString();
 const kb = (bytes: number) => (bytes < 1024 ? `${bytes} B` : `${(bytes / 1024).toFixed(1)} KB`);
@@ -90,9 +90,9 @@ export class HistoryModal extends Modal {
           .setButtonText(`Restore v${v.version}`)
           .setWarning()
           .onClick(async () => {
-            await this.run(restoreVersion(v));
-            this.onRestored(v.path);
-            new Notice(`Restored ${v.path} to v${v.version}`);
+            await this.run(restoreVersion(v, this.path));
+            this.onRestored(this.path);
+            new Notice(`Restored ${this.path} to v${v.version}${v.path !== this.path ? ` (from ${v.path})` : ""}`);
             this.close();
           }),
       );

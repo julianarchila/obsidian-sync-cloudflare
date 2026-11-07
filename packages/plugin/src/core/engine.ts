@@ -2,7 +2,7 @@
  * Sync engine: reconciles three views of every path.
  *
  *   local  – bytes on this device
- *   base   – what this device last agreed with the server (version + plaintext hash)
+ *   base   – what this device last agreed with the server (version + content hash)
  *   remote – the server's change log
  *
  *   local == base, remote moved   -> pull
@@ -20,10 +20,10 @@ import * as Effect from "effect/Effect";
 import * as Semaphore from "effect/Semaphore";
 
 import { concat, sha256, split } from "./bytes.ts";
+import { decodeMeta, encodeMeta } from "./file-meta.ts";
 import {
   type BaseEntry,
-  Codec,
-  type CodecError,
+  type MetaError,
   type FileMeta,
   type FileStat,
   LocalState,
@@ -55,6 +55,12 @@ export interface EngineOptions {
   readonly onProgress?: (progress: Progress | null) => void;
   /** One entry per user-visible action, for the activity log. */
   readonly onActivity?: (activity: Activity) => void;
+  /**
+   * Id of the vault on the server (from `openPlainVault`). State saved for another vault with
+   * the same name (deleted and created again) is dropped: this device then joins like a new
+   * one. Without it (offline status), the saved state is used as is.
+   */
+  readonly vaultInstance?: string;
 }
 
 export interface Progress {
@@ -88,7 +94,7 @@ export interface Activity {
 const LARGE_BYTES = 1024 * 1024;
 const NOTE_EXT = /\.(md|canvas|base|txt|json)$/i;
 
-export type SyncError = RemoteError | VaultError | CodecError;
+export type SyncError = RemoteError | VaultError | MetaError;
 
 export interface SyncReport {
   pulled: number;
@@ -120,15 +126,21 @@ export const makeEngine = (options: EngineOptions) =>
   Effect.gen(function* () {
     const vault = yield* VaultIo;
     const remote = yield* Remote;
-    const codec = yield* Codec;
     const store = yield* LocalState;
-    const state: SyncState = yield* store.load;
+    const loaded = yield* store.load;
+    const instance = options.vaultInstance;
+    const state: SyncState =
+      instance === undefined || (loaded.vault ?? "") === instance ? loaded : { cursor: 0, base: {}, vault: instance };
     const lock = yield* Semaphore.make(1);
     const log = options.log ?? (() => {});
     const activity = (kind: ActivityKind, path: string, detail?: string) =>
       options.onActivity?.({ kind, path, at: Date.now(), detail });
 
     const save = store.save(state);
+    if (state !== loaded) {
+      log("this vault id now names a different vault: syncing from scratch");
+      yield* save;
+    }
 
     const setBase = (path: string, entry: Entry, meta: FileMeta, stat: FileStat | null) => {
       state.base[path] = {
@@ -144,19 +156,16 @@ export const makeEngine = (options: EngineOptions) =>
     // ---------------------------------------------------------------- content
 
     const download = (chunks: ReadonlyArray<string>) =>
-      Effect.forEach(chunks, (hash) => remote.getBlob(hash).pipe(Effect.flatMap(codec.openChunk)), {
-        concurrency: 4,
-      }).pipe(Effect.map(concat));
+      Effect.forEach(chunks, (hash) => remote.getBlob(hash), { concurrency: 4 }).pipe(Effect.map(concat));
 
-    /** Seal and upload a file's chunks, skipping ones the server already has from the base version. */
+    /** Upload a file's chunks, skipping ones the server already has from the base version. */
     const upload = (bytes: Uint8Array, known: ReadonlyArray<string>) =>
       Effect.forEach(
         split(bytes, CHUNK_SIZE),
         (chunk) =>
           Effect.gen(function* () {
-            const sealed = yield* codec.sealChunk(chunk);
-            const hash = yield* sha256(sealed);
-            if (!known.includes(hash)) yield* remote.putBlob(hash, sealed);
+            const hash = yield* sha256(chunk);
+            if (!known.includes(hash)) yield* remote.putBlob(hash, chunk);
             return hash;
           }),
         { concurrency: 4 },
@@ -176,6 +185,44 @@ export const makeEngine = (options: EngineOptions) =>
 
     const removeLocal = (path: string) =>
       vault.remove(path).pipe(Effect.tap(() => Effect.sync(() => options.onLocalWrite?.(path))));
+
+    /** Synced paths by content hash, built once per pull (entries are checked on read, so staleness is harmless). */
+    let byHash: Map<string, string[]> | undefined;
+
+    /** Bytes for `hash` already on this device (an unchanged synced file), to avoid downloading them again. */
+    const localCopy = (hash: string, exclude: string) =>
+      Effect.gen(function* () {
+        if (byHash === undefined) {
+          byHash = new Map();
+          for (const [path, base] of Object.entries(state.base)) {
+            const paths = byHash.get(base.hash);
+            if (paths) paths.push(path);
+            else byHash.set(base.hash, [path]);
+          }
+        }
+        for (const path of byHash.get(hash) ?? []) {
+          if (path === exclude) continue;
+          const local = yield* readLocal(path);
+          if (local !== null && local.hash === hash) return local.bytes;
+        }
+        return null;
+      });
+
+    const fetchContent = (entry: Entry, meta: FileMeta, path: string) =>
+      localCopy(meta.hash, path).pipe(
+        Effect.flatMap((bytes) => (bytes !== null ? Effect.succeed(bytes) : download(entry.chunks))),
+      );
+
+    /** A not-yet-pushed local file holding `base`'s content: where `path` was moved while offline. */
+    const findLocalMove = (base: BaseEntry) =>
+      Effect.gen(function* () {
+        for (const file of yield* vault.list) {
+          if (state.base[file.path] !== undefined || file.size !== base.size || !options.isSyncable(file.path)) continue;
+          const local = yield* readLocal(file.path);
+          if (local !== null && local.hash === base.hash) return file.path;
+        }
+        return null;
+      });
 
     /** Remote version wins the path; ours survives as a conflict copy (or both merge). */
     const resolveConflict = (path: string, base: BaseEntry | undefined, ours: Uint8Array, entry: Entry, meta: FileMeta) =>
@@ -229,8 +276,21 @@ export const makeEngine = (options: EngineOptions) =>
 
         if (local !== null && local.hash === meta.hash) return setBase(path, entry, meta, local.stat);
 
+        // Moved here while offline, edited elsewhere: put the edit at the new path (the push
+        // then records the move) instead of recreating the old path next to it.
+        if (local === null && base !== undefined) {
+          const movedTo = yield* findLocalMove(base);
+          if (movedTo !== null) {
+            yield* writeLocal(movedTo, yield* download(entry.chunks));
+            state.base[path] = { pathId: entry.path, version: entry.version, hash: meta.hash, size: meta.size, mtime: meta.mtime, chunks: entry.chunks };
+            report.pulled++;
+            activity("downloaded", movedTo, `edited elsewhere; moved here from ${path}`);
+            return;
+          }
+        }
+
         if (local === null || localUnchanged) {
-          const stat = yield* writeLocal(path, yield* download(entry.chunks));
+          const stat = yield* writeLocal(path, yield* fetchContent(entry, meta, path));
           setBase(path, entry, meta, stat);
           report.pulled++;
           activity("downloaded", path);
@@ -249,18 +309,31 @@ export const makeEngine = (options: EngineOptions) =>
      */
     const pull = (report: SyncReport, takeDirty?: () => ReadonlySet<string>) =>
       Effect.gen(function* () {
+        byHash = undefined;
         for (;;) {
           const page = yield* remote.changes(state.cursor);
           const work: Array<{ entry: Entry; meta: FileMeta; size: number; small: boolean }> = [];
           for (const entry of page.entries) {
-            const meta = yield* codec.openMeta(entry.path, entry.meta);
-            if (!options.isSyncable(meta.path)) continue;
+            // Unreadable or unsafe metadata (e.g. a path escaping the vault): skip that entry only.
+            const meta = yield* decodeMeta(entry.path, entry.meta).pipe(
+              Effect.catchTag("MetaError", (error) =>
+                Effect.sync(() => {
+                  report.skipped++;
+                  log(`skipped ${entry.path}: ${error.message}`);
+                  activity("skipped", entry.path, error.message);
+                  return null;
+                }),
+              ),
+            );
+            if (meta === null || !options.isSyncable(meta.path)) continue;
             const base = state.base[meta.path];
             if (base && base.pathId === entry.path && base.version >= entry.version) continue;
             const size = entry.deleted ? 0 : meta.size;
             work.push({ entry, meta, size, small: size < LARGE_BYTES || NOTE_EXT.test(meta.path) });
           }
           work.sort((a, b) => Number(b.small) - Number(a.small) || a.size - b.size);
+          // Rename tombstones go last: the new path reuses the old file's bytes before it is removed.
+          work.sort((a, b) => Number(a.entry.movedTo !== undefined) - Number(b.entry.movedTo !== undefined));
 
           const total = work.length;
           const bytesTotal = work.reduce((n, w) => n + w.size, 0);
@@ -337,14 +410,13 @@ export const makeEngine = (options: EngineOptions) =>
 
     const putOp = (change: LocalChange, baseVersion: number | null) =>
       Effect.gen(function* () {
-        const pathId = yield* codec.pathId(change.path);
         const chunks = yield* upload(change.bytes, change.base?.chunks ?? []);
         const op: Op = {
           op: "put",
-          path: pathId,
+          path: change.path,
           baseVersion,
           chunks,
-          meta: yield* codec.sealMeta(pathId, metaFor(change)),
+          meta: encodeMeta(metaFor(change)),
           device: options.device,
         };
         return op;
@@ -380,7 +452,7 @@ export const makeEngine = (options: EngineOptions) =>
                 }
                 continue;
               }
-              const meta = yield* codec.openMeta(current.path, current.meta);
+              const meta = yield* decodeMeta(current.path, current.meta);
               if (meta.hash === change.hash) {
                 // Our own earlier write (a retried commit): already done.
                 setBase(change.path, current, meta, change.stat);
@@ -398,7 +470,7 @@ export const makeEngine = (options: EngineOptions) =>
                 continue;
               }
               // Edited remotely while we deleted it: the edit wins, restore it.
-              const meta = yield* codec.openMeta(result.current.path, result.current.meta);
+              const meta = yield* decodeMeta(result.current.path, result.current.meta);
               const stat = yield* writeLocal(item.path, yield* download(result.current.chunks));
               setBase(item.path, result.current, meta, stat);
               log(`${item.path} was edited elsewhere; restored instead of deleting`);
@@ -407,6 +479,9 @@ export const makeEngine = (options: EngineOptions) =>
               if (result.ok) {
                 delete state.base[item.from];
                 setBase(item.change.path, result.entries[1]!, metaFor(item.change), item.change.stat);
+                // Edited during the move: the server has the old content at the new path. Push the edit next.
+                if (item.change.hash !== item.base.hash)
+                  state.base[item.change.path] = { ...state.base[item.change.path]!, hash: item.base.hash, size: -1 };
                 report.pushed++;
                 activity("renamed", item.change.path, item.from);
                 continue;
@@ -439,18 +514,39 @@ export const makeEngine = (options: EngineOptions) =>
           changed = changed.filter((c) => c !== change);
         }
 
+        // Moved and edited in one go (e.g. links rewritten while moving): a note with the same
+        // file name in another folder and a similar size, and only one candidate on each side.
+        // Notes only: settings files (plugins/X/main.js → plugins/Y/main.js) share names
+        // without being the same file.
+        const isNote = (path: string) => /\.md$/i.test(path) && !path.split("/").some((part) => part.startsWith("."));
+        for (const from of [...missing]) {
+          if (!isNote(from)) continue;
+          const base = state.base[from]!;
+          const name = from.slice(from.lastIndexOf("/") + 1);
+          const similar = (size: number) => Math.abs(size - base.size) <= Math.max(1024, base.size / 2);
+          const matches = changed.filter(
+            (c) => c.base === undefined && c.path.slice(c.path.lastIndexOf("/") + 1) === name && similar(c.stat.size),
+          );
+          const sameName = missing.filter((p) => p.slice(p.lastIndexOf("/") + 1) === name);
+          if (matches.length !== 1 || sameName.length !== 1) continue;
+          const change = matches[0]!;
+          renames.push({ from, change, base });
+          missing = missing.filter((p) => p !== from);
+          changed = changed.filter((c) => c !== change);
+        }
+
         const pending: Pending[] = [];
         for (const { from, change, base } of renames) {
-          const to = yield* codec.pathId(change.path);
           const op: Op = {
             op: "rename",
             from: base.pathId,
-            to,
+            to: change.path,
             baseVersion: base.version,
-            meta: yield* codec.sealMeta(to, metaFor(change)),
+            // The server moves the stored content; an edit made with the move is pushed right after.
+            meta: encodeMeta({ ...metaFor(change), hash: base.hash, size: base.size }),
             device: options.device,
           };
-          pending.push({ kind: "rename", from, change: { ...change, base: { ...base, pathId: to } }, base, op });
+          pending.push({ kind: "rename", from, change: { ...change, base: { ...base, pathId: change.path } }, base, op });
         }
         for (const path of missing) {
           const base = state.base[path]!;

@@ -11,7 +11,7 @@ export const readToken = (request: Request): string | undefined => {
 };
 
 /** Constant-time string comparison. */
-const safeEqual = (a: string, b: string) => {
+export const safeEqual = (a: string, b: string) => {
   const left = new TextEncoder().encode(a);
   const right = new TextEncoder().encode(b);
   let diff = left.length ^ right.length;

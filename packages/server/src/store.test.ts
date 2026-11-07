@@ -109,3 +109,33 @@ describe("VaultStore", () => {
     expect(store.changes(cursor, 1000).entries.map((e) => e.path)).toEqual(["f123"]);
   });
 });
+
+describe("recent", () => {
+  test("newest first, or the next ones after `since` oldest first", () => {
+    const store = new VaultStore(bunSql());
+    for (const p of ["a", "b", "c", "d", "e"]) store.commit([put(p, null)]);
+    expect(store.recent(2).map((e) => e.path)).toEqual(["e", "d"]);
+    expect(store.recent(2, 1, true).map((e) => e.path)).toEqual(["b", "c"]);
+  });
+});
+
+describe("SearchIndex links", () => {
+  test("finds notes by link key, replaces them on reindex, and reindexes old databases", async () => {
+    const { SearchIndex } = await import("./search-index.ts");
+    const sql = bunSql();
+    const store = new VaultStore(sql);
+    store.commit([put("n1.md", null), put("n2.md", null)]);
+    const index = new SearchIndex(sql);
+    index.apply([
+      { pathId: "n1.md", seq: 1, path: "n1.md", text: "[[plan]]", links: ["plan"] },
+      { pathId: "n2.md", seq: 2, path: "n2.md", text: "[[work/plan]]", links: ["work/plan"] },
+    ]);
+    expect(index.linking(["work/plan", "plan"])).toEqual(["n1.md", "n2.md"]);
+    index.apply([{ pathId: "n1.md", seq: 3, path: "n1.md", text: "no links", links: [] }]);
+    expect(index.linking(["plan"])).toEqual([]);
+
+    // A database indexed before links were tracked is indexed again.
+    sql.run("DROP TABLE search_links");
+    expect(new SearchIndex(sql).backlog()).toBe(2);
+  });
+});

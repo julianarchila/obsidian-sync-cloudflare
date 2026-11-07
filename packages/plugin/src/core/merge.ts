@@ -152,7 +152,7 @@ export const merge3 = (base: string, ours: string, theirs: string): string | nul
 // ---------------------------------------------------------------- engine hook
 
 const TEXT_EXTENSIONS = new Set(["md", "txt"]);
-const strict = new TextDecoder("utf-8", { fatal: true });
+const strict = new TextDecoder("utf-8", { fatal: true, ignoreBOM: false });
 
 const asText = (bytes: Uint8Array) => {
   try {

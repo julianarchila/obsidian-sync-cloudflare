@@ -139,7 +139,7 @@ export const obsidianLocalState = (app: App, file: string): LocalStateShape => (
   load: Effect.promise(async () => {
     try {
       const parsed = JSON.parse(await app.vault.adapter.read(file)) as SyncState;
-      return { cursor: parsed.cursor ?? 0, base: parsed.base ?? {} };
+      return { cursor: parsed.cursor ?? 0, base: parsed.base ?? {}, vault: parsed.vault };
     } catch {
       return { cursor: 0, base: {} };
     }

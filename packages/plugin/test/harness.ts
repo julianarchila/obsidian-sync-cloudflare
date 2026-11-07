@@ -11,10 +11,7 @@ import * as Layer from "effect/Layer";
 
 import { decodeText, encodeText, sha256 } from "../src/core/bytes.ts";
 import { type EngineOptions, makeEngine } from "../src/core/engine.ts";
-import { plainCodec } from "../src/core/plain-codec.ts";
 import {
-  Codec,
-  type CodecShape,
   type FileStat,
   LocalState,
   Remote,
@@ -51,7 +48,6 @@ export class Server {
         return raw.deleted;
       },
       meta: count(raw.meta, "meta"),
-      replaceMeta: count(raw.replaceMeta, "replaceMeta"),
       putBlob: count(raw.putBlob, "putBlob"),
       getBlob: count(raw.getBlob, "getBlob"),
     };
@@ -66,7 +62,6 @@ export class Server {
       history: (pathId) => guard(() => this.store.history(pathId)),
       deleted: guard(() => this.store.deleted()),
       meta: (init) => guard(() => this.store.meta(init)),
-      replaceMeta: (expected, next) => guard(() => this.store.replaceMeta(expected, next)),
       putBlob: (hash, data) =>
         this.online
           ? sha256(data).pipe(
@@ -100,7 +95,6 @@ export class Device {
     readonly name: string,
     remote: Server | RemoteShape,
     readonly options: Partial<EngineOptions> = {},
-    readonly codec: CodecShape = plainCodec,
   ) {
     this.remote = remote instanceof Server ? remote.remote() : remote;
   }
@@ -128,7 +122,6 @@ export class Device {
         remove: (path) => Effect.sync(() => void files.delete(path)),
       }),
       Layer.succeed(Remote, this.remote),
-      Layer.succeed(Codec, this.codec),
       Layer.succeed(LocalState, {
         load: Effect.sync(() => this.state),
         save: (s) => Effect.sync(() => void (this.state = structuredClone(s))),
@@ -172,10 +165,10 @@ export class Device {
   }
 }
 
-export const setup = async (n = 2, options: Partial<EngineOptions> = {}, codec?: () => CodecShape) => {
+export const setup = async (n = 2, options: Partial<EngineOptions> = {}) => {
   const server = new Server();
   const devices = await Promise.all(
-    Array.from({ length: n }, (_, i) => new Device(`dev${i + 1}`, server, options, codec?.()).start()),
+    Array.from({ length: n }, (_, i) => new Device(`dev${i + 1}`, server, options).start()),
   );
   return { server, devices };
 };

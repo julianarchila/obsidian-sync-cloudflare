@@ -18,8 +18,8 @@ export class RemoteError extends Data.TaggedError("RemoteError")<{ readonly mess
 /** Local filesystem failure. */
 export class VaultError extends Data.TaggedError("VaultError")<{ readonly message: string; readonly path: string }> {}
 
-/** Sealed data could not be opened: wrong key or tampered data. */
-export class CodecError extends Data.TaggedError("CodecError")<{ readonly message: string }> {}
+/** An entry's metadata is invalid or doesn't match its path. */
+export class MetaError extends Data.TaggedError("MetaError")<{ readonly message: string }> {}
 
 // ---------------------------------------------------------------- local vault
 
@@ -48,38 +48,26 @@ export interface RemoteShape {
   readonly commit: (ops: ReadonlyArray<Op>) => Effect.Effect<ReadonlyArray<OpResult>, RemoteError>;
   readonly history: (pathId: string) => Effect.Effect<ReadonlyArray<Entry>, RemoteError>;
   readonly deleted: Effect.Effect<ReadonlyArray<Entry>, RemoteError>;
+  /** Path ids this one was renamed from, newest first (servers without it: none). */
+  readonly movedFrom?: (pathId: string) => Effect.Effect<ReadonlyArray<string>, RemoteError>;
   /** Read the vault meta, or create it when `init` is given and none exists. */
   readonly meta: (init?: string) => Effect.Effect<{ meta: string | null; created: boolean }, RemoteError>;
-  /** Compare-and-swap the vault meta (password change). */
-  readonly replaceMeta: (expected: string, next: string) => Effect.Effect<{ meta: string | null; replaced: boolean }, RemoteError>;
   readonly putBlob: (hash: string, data: Uint8Array) => Effect.Effect<void, RemoteError>;
   readonly getBlob: (hash: string) => Effect.Effect<Uint8Array, RemoteError>;
 }
 
 export class Remote extends Context.Service<Remote, RemoteShape>()("oscf/Remote") {}
 
-// ---------------------------------------------------------------- codec (encryption)
+// ---------------------------------------------------------------- file metadata
 
-/** What the server must not see, sealed into `Entry.meta`. */
+/** Stored as JSON in `Entry.meta` (see file-meta.ts). */
 export interface FileMeta {
   readonly path: string;
-  /** SHA-256 hex of the plaintext. */
+  /** SHA-256 hex of the content. */
   readonly hash: string;
   readonly size: number;
   readonly mtime: number;
 }
-
-export interface CodecShape {
-  /** Stable, opaque id for a path (what the server indexes). */
-  readonly pathId: (path: string) => Effect.Effect<string>;
-  readonly sealMeta: (pathId: string, meta: FileMeta) => Effect.Effect<string>;
-  readonly openMeta: (pathId: string, sealed: string) => Effect.Effect<FileMeta, CodecError>;
-  /** Encrypt one plaintext chunk into the bytes stored in R2. Deterministic, so identical chunks dedupe. */
-  readonly sealChunk: (plain: Uint8Array) => Effect.Effect<Uint8Array>;
-  readonly openChunk: (sealed: Uint8Array) => Effect.Effect<Uint8Array, CodecError>;
-}
-
-export class Codec extends Context.Service<Codec, CodecShape>()("oscf/Codec") {}
 
 // ---------------------------------------------------------------- local state
 
@@ -87,7 +75,7 @@ export class Codec extends Context.Service<Codec, CodecShape>()("oscf/Codec") {}
 export interface BaseEntry {
   readonly pathId: string;
   readonly version: number;
-  /** Plaintext hash. */
+  /** Content hash. */
   readonly hash: string;
   /** Local stat at sync time: lets the scan skip unchanged files without hashing. */
   readonly size: number;
@@ -98,6 +86,8 @@ export interface BaseEntry {
 export interface SyncState {
   cursor: number;
   base: Record<string, BaseEntry>;
+  /** Id of the vault this state belongs to (see plain-vault.ts); a vault deleted and created again has a new one. */
+  vault?: string;
 }
 
 export interface LocalStateShape {

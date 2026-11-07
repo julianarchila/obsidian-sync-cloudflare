@@ -10,7 +10,7 @@ import * as Layer from "effect/Layer";
 import { Connection, type Timers } from "../core/connection.ts";
 import { type Engine, type EngineOptions, makeEngine, type SyncReport } from "../core/engine.ts";
 import { makeHttpRemote, socketUrl } from "../core/http-remote.ts";
-import { Codec, type CodecShape, LocalState, Remote, VaultIo, type LocalStateShape, type VaultIoShape } from "../core/services.ts";
+import { LocalState, Remote, VaultIo, type LocalStateShape, type VaultIoShape } from "../core/services.ts";
 import { obsidianHttp } from "./adapters.ts";
 
 export interface SyncClientOptions {
@@ -19,7 +19,6 @@ export interface SyncClientOptions {
   readonly token: string;
   readonly vaultIo: VaultIoShape;
   readonly localState: LocalStateShape;
-  readonly codec: CodecShape;
   readonly engine: EngineOptions;
   /** Re-read the whole index before the first sync (selective-sync settings changed). */
   readonly resetCursor?: boolean;
@@ -48,7 +47,7 @@ const timers: Timers = {
  */
 export class SyncClient {
   engine: Engine | undefined;
-  private layer: Layer.Layer<VaultIo | Remote | Codec | LocalState> | undefined;
+  private layer: Layer.Layer<VaultIo | Remote | LocalState> | undefined;
   private connection: Connection | undefined;
   private stopped = false;
   private dirty = new Set<string>();
@@ -66,7 +65,6 @@ export class SyncClient {
     const layer = (this.layer = Layer.mergeAll(
       Layer.succeed(VaultIo, this.o.vaultIo),
       Layer.succeed(Remote, remote),
-      Layer.succeed(Codec, this.o.codec),
       Layer.succeed(LocalState, this.o.localState),
     ));
     this.engine = await Effect.runPromise(makeEngine(this.o.engine).pipe(Effect.provide(layer)));
@@ -98,7 +96,7 @@ export class SyncClient {
   };
 
   /** Run an effect with this vault's services (history, recovery). */
-  withServices<A, E>(effect: Effect.Effect<A, E, VaultIo | Remote | Codec | LocalState>): Promise<A> {
+  withServices<A, E>(effect: Effect.Effect<A, E, VaultIo | Remote | LocalState>): Promise<A> {
     if (!this.layer) return Promise.reject(new Error("Not connected"));
     return Effect.runPromise(effect.pipe(Effect.provide(this.layer)));
   }

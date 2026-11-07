@@ -1,0 +1,12 @@
+{
+  "name": "@oscf/cli",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "homebase": "./src/main.ts"
+  },
+  "dependencies": {
+    "@oscf/protocol": "workspace:*",
+    "effect": "4.1.2"
+  }
+}

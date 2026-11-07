@@ -3,16 +3,15 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 
 import { deletedFiles, fileHistory, readVersion, restoreDeleted, restoreVersion } from "../src/core/history.ts";
-import { Codec, Remote, VaultIo } from "../src/core/services.ts";
+import { Remote, VaultIo } from "../src/core/services.ts";
 import { type Device, setup } from "./harness.ts";
 
 /** Run a history operation with a device's services. */
-const on = <A, E>(device: Device, effect: Effect.Effect<A, E, Codec | Remote | VaultIo>) =>
+const on = <A, E>(device: Device, effect: Effect.Effect<A, E, Remote | VaultIo>) =>
   Effect.runPromise(
     effect.pipe(
       Effect.provide(
         Layer.mergeAll(
-          Layer.succeed(Codec, device.codec),
           Layer.succeed(Remote, device.remote),
           Layer.succeed(VaultIo, {
             list: Effect.sync(() => []),

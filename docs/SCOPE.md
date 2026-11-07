@@ -4,7 +4,9 @@ v1 is the first version good enough to hold a real vault. It targets one user pe
 
 ## Product goal
 
-A drop-in replacement for Obsidian Sync that anyone can self-host on their own Cloudflare account with one command. End-to-end encryption is always on: the server never sees plaintext. Features beyond Sync parity, such as a headless CLI, server-side search or AI, and a web viewer, are possible extensions built on top. They are out of scope until explicitly planned.
+A drop-in replacement for Obsidian Sync that anyone can self-host on their own Cloudflare account with one command, and that lets the owner's AI agents work on the same notes: shell agents through a synced folder (headless CLI), chat apps such as Claude and ChatGPT through an MCP endpoint. Agent changes go through the same change log as devices, so they merge, are attributed and can be undone.
+
+Free, open source personal software: each person deploys their own single-tenant instance. A web viewer and server-side AI stay out of scope until explicitly planned.
 
 ## Decisions
 
@@ -12,12 +14,13 @@ A drop-in replacement for Obsidian Sync that anyone can self-host on their own C
 |---|---|
 | Users | One owner. One shared deploy token. |
 | Devices | Desktop only (macOS). Mobile comes after v1. |
-| Encryption | End-to-end encryption, mandatory. The key comes from a per-vault password via PBKDF2-SHA256 and is entered on each device. A lost password means unrecoverable data, which is accepted. |
-| Crypto stack | `effect/crypto` (Aead AES-256-GCM, Kdf PBKDF2) on WebCrypto. No new dependencies. |
+| Encryption | None at the application level since M7 (`plain-v1`): the Worker must read notes for MCP and search. TLS in transit, R2 and Durable Object storage at rest. The owner's Cloudflare account (2FA) and tokens are the boundary. Was end-to-end encryption in M1–M6 (up to 0.2); removed in 0.3, when the owner's vault moved to a new plain vault id. |
+| Agent access | Folder (CLI) for shell agents, MCP for chat apps. One change log, so both converge with devices. Writes carry a version: compare-and-swap, three-way merge on the server when the caller read an older version, explicit refusal when edits overlap. |
+| Connector auth | OAuth 2.1 (PKCE S256, dynamic client registration, client ID metadata documents) with stateless tokens signed by a key derived from `OSCF_TOKEN`. The owner approves each connection with the deploy token and picks vault, read or write access and folders. Static tokens with the same scopes in `OSCF_MCP_CLIENTS`. |
 | Vault index | A custom Durable Object with an append-only change log (one SQLite row per file version, plus a `seq` cursor). This replaces Yielded Sync, which stores the whole index as one JSON row (2 MB cap, so only about 7k files, rewritten on every change). Vault size stops mattering, and the log doubles as version history. |
-| File size | No practical limit. Files are split into chunks of about 8 MB, each encrypted and content-addressed, plus a manifest. This stays under the Workers request-body limit (100 MB on Free and Pro zones) and dedupes unchanged chunks across versions. |
-| Client architecture | Effect powers the sync engine: reconcile, queue and concurrency, retries, WebSocket lifecycle, crypto and protocol validation with `Schema` shared with `packages/protocol`. The Obsidian glue (events, settings, UI) stays plain TypeScript. The vault, network and clock are Layers, so the engine is tested headlessly in `bun test`, beyond the slower agent-desktop end-to-end runs. |
-| Bundle | The plugin imports Effect only by module (`effect/Effect`, `effect/Schema`, `effect/crypto/Aead`, …), never from the `effect` barrel. CI checks this. Measured with esbuild: the planned feature set is about 97 KB minified (33 KB gzip) with module imports, versus about 450 KB with barrel imports and 513 KB today with Yielded. Budget: 150 KB minified. |
+| File size | No practical limit. Files are split into chunks of about 8 MB, each content-addressed (SHA-256), listed in order on the file's entry. This stays under the Workers request-body limit (100 MB on Free and Pro zones) and dedupes unchanged chunks across versions. |
+| Client architecture | Effect powers the sync engine: reconcile, queue and concurrency, retries, WebSocket lifecycle and protocol validation with `Schema` shared with `packages/protocol`. The Obsidian glue (events, settings, UI) stays plain TypeScript. The vault, network and clock are Layers, so the engine is tested headlessly in `bun test`, beyond the slower agent-desktop end-to-end runs. |
+| Bundle | The plugin imports Effect only by module (`effect/Effect`, `effect/Schema`, …), never from the `effect` barrel. CI checks this. Measured with esbuild: the planned feature set is about 97 KB minified (33 KB gzip) with module imports, versus about 450 KB with barrel imports and 513 KB today with Yielded. Budget: 150 KB minified. |
 | Offline | A requirement in every milestone, not a feature of its own. Edits made offline or while Obsidian is closed must converge on reconnect without data loss. |
 | Audience | Self-hosters: one `bun run deploy` on your own Cloudflare account. |
 
@@ -47,7 +50,7 @@ Each milestone is a PR. It is done only when `typecheck`, `smoke`/`smoke:dev` an
   - A synthetic vault with 20k files syncs, and a single edit writes O(1) rows.
   - The plugin bundle stays under 150 KB minified.
 
-### M1: End-to-end encryption ✅ (#4)
+### M1: End-to-end encryption ✅ (#4), removed in M7
 
 This changes the data format, so it comes first. Existing test data is wiped.
 
@@ -96,18 +99,42 @@ This changes the data format, so it comes first. Existing test data is wiped.
 - `.json` config files are merged by key on conflict.
 - **Done when:** end-to-end tests show that a theme, a hotkey and a snippet changed in A appear in B, and that this plugin's data is never synced.
 
-### M6: Real-vault migration ✅
+### M6: Real-vault migration ✅ (encrypted format)
 
 1. **Dry run.** Copy the real vault to a test location (read-only on the original), sync it into a new remote vault, and verify a second test vault reproduces it byte for byte.
 2. **Cutover.** Move the real vault out of any other sync service (iCloud, Google Drive, Dropbox, Obsidian Sync), because running two sync engines on one folder corrupts data. Then connect it to the plugin. The owner decides when.
 3. A fresh backup of the vault exists before cutover.
 
-## Out of v1
+## Agent access (v2)
+
+### M7: Plain vaults ✅ (#4)
+
+- Vault meta records `plain-v1`; the plugin creates and opens plain vaults and refuses any other format with a clear message.
+- Entries are keyed by their real path and metadata is JSON, validated against that path (an unsafe path is skipped, never written).
+- The owner's encrypted vault was deleted and created again as plain under the same id: the most complete device uploaded it, the others joined (vault ids tell devices to drop state saved for the old vault). The encryption code was then removed.
+- **Done when:** unit tests, smoke and the Obsidian end-to-end run pass on plain vaults, and the owner's devices sync the new vault.
+
+### M8: Headless CLI (#4, draft)
+
+- `homebase init | sync | watch | status | history | restore | deleted | restore-deleted | mv`, same engine as the plugin.
+- `watch`: WebSocket pulls, file events trigger a stat-only scan, polling when the folder can't be watched, retries with backoff, waits for the server at start.
+- Moves are first-class: history follows a renamed file, a move edited in the same pass keeps its history, an offline move doesn't duplicate a file edited elsewhere, receiving devices reuse local bytes. `mv` rewrites links.
+- `.homebaseignore`; hidden files never sync.
+- **Done when:** `scripts/cli-e2e.ts` passes on macOS and Linux, including bursts and `watch`; the systemd unit in the CLI README works.
+
+### M9: MCP endpoint and OAuth (#4)
+
+- Stateless MCP (2026-07-28, `effect/ai/McpServer`) at `/mcp/<vault>`: read, search (FTS5), backlinks, versioned writes with merge, moves with link rewriting, history, diff, targeted undo, recovery, images.
+- Per-connection access (read or write), folder and vault scopes; every change attributed as `mcp:<connection>`.
+- OAuth for connectors (see Decisions).
+- **Done when:** `scripts/mcp-e2e.ts` and `scripts/oauth-e2e.ts` pass, field tests with real agents show no silent overwrites, and a connector is added from Claude with only the URL.
+
+## Out of scope for now
 
 - Mobile (iOS and Android).
 - Shared vaults and multiple users.
-- Device pairing or JWT per-device tokens. The single token stays; E2EE protects contents even if it leaks.
-- Headless or CLI sync.
+- Per-device tokens for the plugin and CLI. They share the deploy token, which now also guards contents: keep it secret, rotate it if it leaks (rotation also revokes every OAuth connection).
+- Revoking a single OAuth connection (only all at once, by rotating the token).
 - Public polish: setup wizard, community-plugin or BRAT listing, docs for other self-hosters, and scrubbing the prod URL from `AGENTS.md`.
 
 ## Testing offline

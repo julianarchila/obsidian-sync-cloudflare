@@ -8,7 +8,8 @@ import type { Entry } from "@oscf/protocol";
 import * as Effect from "effect/Effect";
 
 import { concat } from "./bytes.ts";
-import { Codec, Remote, VaultIo } from "./services.ts";
+import { decodeMeta } from "./file-meta.ts";
+import { Remote, VaultIo } from "./services.ts";
 
 export interface VersionInfo {
   readonly path: string;
@@ -24,8 +25,7 @@ export interface VersionInfo {
 
 const describe = (entry: Entry) =>
   Effect.gen(function* () {
-    const codec = yield* Codec;
-    const meta = yield* codec.openMeta(entry.path, entry.meta);
+    const meta = yield* decodeMeta(entry.path, entry.meta);
     return {
       path: meta.path,
       version: entry.version,
@@ -38,33 +38,36 @@ const describe = (entry: Entry) =>
     } satisfies VersionInfo;
   });
 
-/** All retained versions of a file, newest first. */
+/** All retained versions of a file, newest first, following it back through renames. */
 export const fileHistory = (path: string) =>
   Effect.gen(function* () {
-    const codec = yield* Codec;
     const remote = yield* Remote;
-    const entries = yield* remote.history(yield* codec.pathId(path));
+    const entries: Entry[] = [];
+    const seen = new Set<string>();
+    let pathId: string | undefined = path;
+    while (pathId !== undefined && !seen.has(pathId) && seen.size < 20) {
+      seen.add(pathId);
+      entries.push(...(yield* remote.history(pathId)));
+      pathId = remote.movedFrom ? (yield* remote.movedFrom(pathId))[0] : undefined;
+    }
     return yield* Effect.forEach(entries, describe);
   });
 
-/** Plaintext content of one version. */
+/** Content of one version. */
 export const readVersion = (info: Pick<VersionInfo, "entry">) =>
   Effect.gen(function* () {
-    const codec = yield* Codec;
     const remote = yield* Remote;
-    const chunks = yield* Effect.forEach(info.entry.chunks, (hash) => remote.getBlob(hash).pipe(Effect.flatMap(codec.openChunk)), {
-      concurrency: 4,
-    });
+    const chunks = yield* Effect.forEach(info.entry.chunks, (hash) => remote.getBlob(hash), { concurrency: 4 });
     return concat(chunks);
   });
 
-/** Bring an old version back as the current content (synced as a new version). */
-export const restoreVersion = (info: VersionInfo) =>
+/** Bring an old version back as the current content of `target` (synced as a new version). */
+export const restoreVersion = (info: VersionInfo, target: string = info.path) =>
   Effect.gen(function* () {
     if (info.deleted) return yield* Effect.die(new Error("Cannot restore a deletion"));
     const vault = yield* VaultIo;
-    yield* vault.write(info.path, yield* readVersion(info));
-    return info.path;
+    yield* vault.write(target, yield* readVersion(info));
+    return target;
   });
 
 export interface DeletedFile {
@@ -93,5 +96,5 @@ export const restoreDeleted = (path: string) =>
     const versions = yield* fileHistory(path);
     const last = versions.find((v) => !v.deleted);
     if (!last) return yield* Effect.fail(new Error(`No retained content for ${path}`));
-    return yield* restoreVersion(last);
+    return yield* restoreVersion(last, path);
   });
